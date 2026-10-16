@@ -1,0 +1,38 @@
+{
+  "name": "@neup-net-depart/piper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev --env production",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint . --max-warnings 0",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "build": "wrangler deploy --dry-run --env production --outdir dist/production",
+    "manifest": "node scripts/manifest.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.13.13",
+    "octokit": "^5.0.5",
+    "@octokit/auth-app": "^8.3.1",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12",
+    "diff": "^8.0.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261016.1",
+    "@cloudflare/vitest-plugin": "^1.4.3",
+    "@eslint/js": "^10.0.0",
+    "@types/node": "^22.18.0",
+    "eslint": "^10.0.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.45.0"
+  }
+}

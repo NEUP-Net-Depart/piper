@@ -1,0 +1,50 @@
+name: Deploy Piper
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - run: npm audit --audit-level=high
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PIPER_APP_ID: ${{ vars.PIPER_APP_ID }}
+      PIPER_BOT_LOGIN: ${{ vars.PIPER_BOT_LOGIN }}
+      PIPER_ALLOWLIST: ${{ vars.PIPER_ALLOWLIST }}
+      PIPER_ORG_DEFAULTS: ${{ vars.PIPER_ORG_DEFAULTS }}
+      PIPER_DRY_RUN: ${{ vars.PIPER_DRY_RUN }}
+      PIPER_WORKER_URL: ${{ vars.PIPER_WORKER_URL }}
+      PIPER_EMERGENCY_STOP: ${{ vars.PIPER_EMERGENCY_STOP }}
+      PIPER_STOPPED_REPOSITORIES: ${{ vars.PIPER_STOPPED_REPOSITORIES }}
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node scripts/deploy-config.mjs
+      - name: Deploy Worker
+        run: npx wrangler deploy --env production --config .piper.deploy.jsonc
+      - name: Smoke check
+        run: node scripts/smoke.mjs

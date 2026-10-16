@@ -1,0 +1,70 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "piper",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "migrations": [
+    {
+      "tag": "v1-task-coordinator",
+      "new_sqlite_classes": [
+        "TaskCoordinator"
+      ]
+    }
+  ],
+  "env": {
+    "production": {
+      "name": "piper-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "APP_ID": "UNCONFIGURED",
+        "BOT_LOGIN": "piper[bot]",
+        "ALLOWED_REPOSITORIES": "",
+        "DRY_RUN": "true",
+        "EMERGENCY_STOP": "false",
+        "ORG_DEFAULTS": "{}",
+        "STOPPED_REPOSITORIES": "",
+        "PUBLIC_URL": "https://piper-production.YOUR-SUBDOMAIN.workers.dev"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "COORDINATORS",
+            "class_name": "TaskCoordinator"
+          }
+        ]
+      },
+      "queues": {
+        "producers": [
+          {
+            "binding": "TASKS",
+            "queue": "piper-production"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "piper-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 1,
+            "max_retries": 5,
+            "dead_letter_queue": "piper-production-dlq",
+            "max_concurrency": 2
+          }
+        ]
+      },
+      "triggers": {
+        "crons": [
+          "*/15 * * * *"
+        ]
+      }
+    }
+  },
+  "assets": {
+    "directory": "./public"
+  }
+}

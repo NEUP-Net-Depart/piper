@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+dist/
+coverage/
+.dev.vars*
+.env*
+*.pem
+*.key
+artifacts/
+.piper.deploy.jsonc

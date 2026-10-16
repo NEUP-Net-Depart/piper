@@ -1,0 +1,30 @@
+{
+  "enabled": false,
+  "dryRun": true,
+  "welcome": {
+    "issue": "感谢你在这里提交第一个 issue！请按 issue 模板填写信息。",
+    "pr": "👋 感谢提交 PR！先看下方“接下来做什么”；代码、检查和审查有变化时，这条评论会自动更新。",
+    "merged": "🎉 你的 PR 已合并！感谢你为项目贡献代码，期待下一次合作！",
+    "guide": "https://github.com/NEUP-Net-Depart/Pioneer-appointment-system/issues/39",
+    "image": "/assets/neurobounce.gif"
+  },
+  "reviewers": {
+    "pool": [],
+    "count": 1,
+    "remindHours": 24,
+    "rotateHours": 48
+  },
+  "merge": {
+    "requiredChecks": [
+      "verify"
+    ],
+    "minApprovals": 1,
+    "auto": false,
+    "allowedBases": [
+      "dev"
+    ],
+    "protectedBranches": [
+      "main"
+    ]
+  }
+}
