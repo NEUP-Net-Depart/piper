@@ -147,7 +147,7 @@ describe('native receipts and controls', () => {
     const job: Job = { id: 'public-pr', repo, installation: 1, kind: 'reconcile', number: 1, time: new Date().toISOString() };
     expect(await processJob(env,job,api)).toBe('ack');
     expect(api.pr.requested_reviewers).toEqual([{ login: 'reviewer' }]);
-    expect(api.comments.some(c => c.body.includes('Piper 协作状态'))).toBe(true);
+    expect(api.pr.body).toContain('### Piper Progress');
     expect(api.calls.some(c => c.route.endsWith('/collaborators') || c.route.endsWith('/subscribers'))).toBe(false);
   });
   it('blocks further writes when the repository is removed from the allowlist', async () => {

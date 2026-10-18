@@ -1,42 +1,64 @@
 import type { GitHub } from './github';
 import { commitMessage, integratedMessage } from './commits';
 import { STATUS_MARKER } from './records';
-import { safeText, type Gate, type PR, type PRState } from './types';
+import { Denied, Retryable, safeText, sha256, type Gate, type PR, type PRState } from './types';
 import { profile, userReference } from './mentions';
 
 const plain = (value: string) => safeText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/([\\`*_{}[\]()|~])/g, '\\$1');
 export const READY_MARKER = '<!-- piper:ready -->';
+export const PROGRESS_START = '<!-- piper:progress -->';
+export const PROGRESS_END = '<!-- piper:progress:end -->';
 const INTEGRATED_MARKER = '<!-- piper:integrated -->';
+const progressURL = (gh: GitHub, number: number) => `https://github.com/${gh.repo}/pull/${number}#piper-progress`;
+
+function withProgress(body: string, progress: string) {
+  const starts = [...body.matchAll(/^<!-- piper:progress -->\r?$/gm)];
+  const ends = [...body.matchAll(/^<!-- piper:progress:end -->\r?$/gm)];
+  if (starts.length || ends.length) {
+    const start = starts[0]?.index, end = ends[0]?.index;
+    if (starts.length !== 1 || ends.length !== 1 || start === undefined || end === undefined || end < start) {
+      throw new Denied('Malformed Piper progress markers; restore the PR description markers before retrying');
+    }
+    // Remove only our section and its separator; keep author text on both sides.
+    const prefix = body.slice(0, start);
+    body = prefix.replace(/\r?\n\r?\n$/, '') + body.slice(end + ends[0]![0].length);
+  }
+  const updated = `${body}${body ? '\n\n' : ''}${PROGRESS_START}\n${progress}\n${PROGRESS_END}`;
+  if (updated.length > 65536) throw new Denied('PR description exceeds GitHub body limit; shorten the description before retrying');
+  return updated;
+}
+
+const revision = (pr: PR) => JSON.stringify([pr.head.sha, pr.head.ref, pr.base.sha, pr.base.ref, pr.title, pr.draft, pr.state, pr.merged, pr.merge_commit_sha]);
 function fenced(value: string) {
   const longest = Math.max(0, ...[...value.matchAll(/`+/g)].map(m => m[0].length));
   const fence = '`'.repeat(Math.max(3, longest + 1));
   return `${fence}\n${value}\n${fence}`;
 }
 
-function integrationSteps(gh: GitHub, pr: PR, state: PRState, ready: boolean) {
+function integrationSteps(gh: GitHub, pr: PR, state: PRState, ready: boolean, policyAuto = false, autoRequestValid = true) {
   const cfg = gh.config!, release = cfg.release.enabled && pr.base.ref === cfg.release.target;
   if (release) return ready
-    ? ['**维护者**：确认集成提示中的最终提交信息后，在新评论中发送：', '', fenced('/release publish'), '', '此 PR 使用 Merge Commit（保留提交历史）。合并后还要等待部署成功，Piper 才会创建版本 Tag 和 Release。']
-    : ['**维护者**：在 Piper 创建的发布 PR 中完成检查并获得当前提交的人工批准后，再确认发布。'];
-  if (state.integration === 'requested' && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha) {
-    return [`**已开启自动集成**：${profile(state.integrate_actor!)} 请求合并当前提交。${ready ? 'Piper 将重新核验并尝试 Squash 合并。' : '条件满足后自动集成。'}无需重复发送命令。`, '', '要取消这次请求，在新评论中发送 `/integrate cancel`。推送新提交会使本次请求失效。'];
+    ? ['**维护者**：确认上方提交信息后，在新评论中发送：', '', fenced('/release publish'), '', '使用 Merge Commit 保留提交历史。部署成功后创建版本 Tag 和 Release。']
+    : [];
+  if (!autoRequestValid && !policyAuto) return ['**自动集成请求无法继续**：请求人已无仓库写权限。请维护者重新发送 `/integrate auto`，或由作者、维护者使用 `/integrate` 手动合并。'];
+  if (autoRequestValid && state.integration === 'requested' && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha) {
+    return [`**已开启自动集成**：${ready ? '等待重新核验并合并。' : '条件满足后自动集成。'}无需重复发送命令。`, '', '取消：`/integrate cancel`。推送新提交后须重新请求。'];
   }
+  if (policyAuto) return ['**仓库自动集成已启用**，等待核验并合并，无需发送命令。'];
   const lines: string[] = [];
-  if (state.integration === 'outdated') lines.push('**旧的集成请求已失效**：PR 有了新提交。完成最新提交的检查和审查后，须重新请求合并。', '');
+  if (state.integration === 'outdated') lines.push('**旧的集成请求已失效**：完成当前提交的检查和审查后，须重新请求合并。', '');
   if (state.integration === 'cancelled') lines.push('集成请求已取消；准备好后可以重新请求。' + (cfg.merge.auto ? '仓库仍启用了独立的自动集成规则；需要暂停它时，请维护者调整 .piper.yml 中的 merge.auto。' : ''), '');
   if (state.integrate_mode === 'manual' && state.integrate_head === pr.head.sha) lines.push('上次 `/integrate` 只尝试一次，没有登记自动合并。条件满足后须重新发送。', '');
   if (ready) {
-    if (cfg.merge.auto) lines.push('仓库已启用自动集成：有写权限作者的非高风险 PR 会由 Piper 再次核验后合并。', '');
-    lines.push(`**作者或维护者**：确认集成提示中的最终提交信息后，在新评论中发送以下命令，将修改合并到 \`${plain(pr.base.ref)}\`：`, '', fenced('/integrate'), '', '普通 PR 使用 Squash（将本次修改合成一个提交）。作者无需仓库写权限。');
+    lines.push(`**作者或维护者**：确认上方提交信息后，在新评论中发送：`, '', fenced('/integrate'), '', `使用 Squash 合并至 \`${plain(pr.base.ref)}\`。作者无需仓库写权限。`);
   }
   return lines;
 }
 
-function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
+async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   const cfg = gh.config!, release = cfg.release.enabled && pr.base.ref === cfg.release.target;
   const url = `https://github.com/${gh.repo}/pull/${pr.number}`;
-  const lines = ['### Piper 协作状态', ''];
-  if (pr.state === 'open' && cfg.welcome.pr) lines.push(safeText(cfg.welcome.pr), '');
+  const lines = ['### Piper Progress', ''];
   lines.push(`分支：${plain(pr.head.ref)} → ${plain(pr.base.ref)} · 当前提交：[${pr.head.sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${pr.head.sha})`, '');
   if (pr.merged) {
     lines.push('**已合并**', '');
@@ -45,25 +67,40 @@ function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   } else if (pr.state !== 'open') {
     lines.push('**已关闭，未合并**', '', '重新打开 PR 后会检查最新提交的 CI 和审查结果。');
   } else if (result) {
-    lines.push(result.ready ? '✅ **检查已满足，等待合并。**' : '⏳ **还有事项待完成。**', '', '#### 接下来做什么', '');
-    for (const item of result.progress.filter(p => !p.ready && p.action)) lines.push(`- ${item.owner ? `**${item.owner}**：` : ''}${plain(item.action!)}`);
-    lines.push('', ...integrationSteps(gh, pr, state, result.ready));
-    if (result.highRisk) lines.push('', release ? '🔒 发布需要当前提交的人工批准和维护者确认。' : '🔒 此 PR 涉及高风险变更，需要当前提交的人工批准和显式集成请求。');
-    lines.push('', `[检查详情（CI）](${url}/checks) · [查看审查意见](${url}/files) · 在新评论中发送 \`/help\` 查看帮助。`, '', '<details>', '<summary>检查进度与审查详情</summary>', '', 'CI 指自动构建和测试；每次推送新提交后重新检查。', '', '#### 检查进度', '');
+    const policyAuto = !release && cfg.merge.auto && !result.highRisk && await gh.maintainer(pr.user.login);
+    const pending = result.progress.filter(p => !p.ready);
+    const actions = pending.filter(p => p.action && p.owner !== '等待' && p.owner !== '审查者')
+      .sort((a, b) => Number(b.owner === '作者') - Number(a.owner === '作者'));
+    const reviews = pending.filter(p => p.owner === '审查者' && p.action);
+    const waiting = pending.filter(p => p.owner === '等待');
+    const reviewers = [...new Set(pr.requested_reviewers.map(r => r.login))].sort().map(profile).join('、');
+    lines.push(result.ready ? '**检查已满足，等待合并。**' : actions.length ? '**需要处理以下事项。**' : '**等待检查或审查，作者暂时无需操作。**', '');
+    if (actions.length) lines.push('#### 需要处理', '', ...actions.map(p => `- **${p.owner ?? '维护者'}**：${plain(p.action!)}`), '');
+    if (reviews.length) lines.push('#### 等待处理', '', ...reviews.map(p => `- **审查者** ${reviewers}：${plain(p.action!)} ${plain(p.detail)}。`), '');
+    if (waiting.length) lines.push('#### 等待系统检查', '', ...waiting.map(p => `- ${plain(p.name)}：${plain(p.detail)}。`), '');
+    if (result.ready) {
+      const automatic = result.autoRequestValid !== false && !release && state.integration === 'requested' && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha;
+      lines.push(policyAuto ? '**仓库自动集成已启用**，等待核验并合并，无需发送命令。' : automatic ? '**已开启自动集成**，等待核验并合并。取消：`/integrate cancel`。' : `**${release ? '维护者' : '作者或维护者'}**：核对就绪通知中的最终提交信息，在新评论中发送 \`${release ? '/release publish' : '/integrate'}\`。`, '');
+      if (release) lines.push('使用 Merge Commit；部署成功后创建版本 Tag 和 Release。', '');
+    }
+    // Request lifecycle belongs in the status; the ready notice carries the preview.
+    if (!policyAuto && (result.autoRequestValid === false || !result.ready || state.integration !== 'requested' || state.integrate_mode !== 'auto')) lines.push(...integrationSteps(gh, pr, state, false, policyAuto, result.autoRequestValid));
+    if (result.highRisk) lines.push('', release ? '发布需要当前提交的人工批准和维护者确认。' : '高风险变更：需要当前提交的人工批准和显式集成请求。');
+    lines.push('', `[检查详情（CI）](${url}/checks) · [审查意见](${url}/files) · 帮助：\`/help\``, '', '#### 检查进度', '');
     for (const item of result.progress) lines.push(`- [${item.ready ? 'x' : ' '}] ${plain(item.name)}：${plain(item.detail)}`);
     const people = (logins: string[]) => logins.map(profile).join('、') || '暂无';
-    lines.push('', '#### 审查者', '', `已批准当前提交：${people(result.reviewers)}。`, `等待审查：${people(pr.requested_reviewers.map(r => r.login).sort())}。`);
+    lines.push('', '<details>', '<summary>审查详情</summary>', '', `已批准当前提交：${people(result.reviewers)}。`, `等待审查：${people(pr.requested_reviewers.map(r => r.login).sort())}。`);
     if (!pr.draft && pr.requested_reviewers.length) lines.push(`请协助审查 [PR #${pr.number}](${url})；批准请在 GitHub 的 Review changes 中选择 Approve。`);
     for (const review of result.reviewDetails ?? []) {
       if (!result.reviewers.includes(review.login)) {
         const commit = `[${review.sha.slice(0, 7)}](https://github.com/${gh.repo}/pull/${pr.number}/files/${review.sha})`;
-        if (review.state === 'APPROVED' && review.sha !== pr.head.sha) lines.push(`- ${profile(review.login)} 的批准对应旧提交 ${commit}，未覆盖当前提交 \`${pr.head.sha.slice(0, 7)}\`。请审查最新代码并重新提交 Approve。`);
+        if (review.state === 'APPROVED' && review.sha !== pr.head.sha && result.outdatedReviewers?.includes(review.login)) lines.push(`- ${profile(review.login)} 的批准对应旧提交 ${commit}，未覆盖当前提交 \`${pr.head.sha.slice(0, 7)}\`，该历史批准不代表当前审查任务。`);
         else lines.push(`- ${profile(review.login)}：${plain(({ APPROVED: '已批准，未计入有效批准', CHANGES_REQUESTED: '要求修改', DISMISSED: '审查已撤销' } as Record<string, string>)[review.state] ?? review.state)}，对应 ${commit}。`);
       }
     }
     lines.push('', '</details>');
     if (result.labelRules?.length) lines.push('', '<details>', '<summary>标签与审查规则</summary>', '', '本次修改匹配以下标签与审查规则：', '', ...result.labelRules.map(r => `- \`${plain(r.name)}\`：${plain(r.reason)}；至少 ${r.minimum} 位批准者；审查池：${people(r.reviewers)}。`), '', '维护者可使用 /label add/remove 标签名 调整展示标签，或使用 /label auto 标签名 恢复自动规则；审查要求仍按修改范围计算。', '', '</details>');
-    lines.push('', '修改代码时，继续推送到当前 PR 的源分支即可；新提交需要重新获得批准。');
+    if (cfg.welcome.pr) lines.push('', safeText(cfg.welcome.pr));
     const metadata = state.metadata;
     if (metadata.summary || metadata.author || metadata.contributors?.length || metadata.tag) {
       lines.push('', '<details>', '<summary>合并设置</summary>', '');
@@ -82,17 +119,29 @@ function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
 }
 
 export async function summarize(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
-  await gh.managedComment(pr.number, STATUS_MARKER, statusBody(gh, pr, state, result));
+  const progress = await statusBody(gh, pr, state, result);
+  const current = await gh.read<PR>('GET /repos/{owner}/{repo}/pulls/{pull_number}', { pull_number: pr.number });
+  if (revision(current) !== revision(pr)) throw new Retryable('PR changed during progress refresh');
+  const body = withProgress(current.body ?? '', progress);
+  if (body !== current.body) {
+    await gh.write(`progress:${pr.number}:${await sha256(body)}`, 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}', { pull_number: pr.number, body }, async () => {
+      const latest = await gh.read<PR>('GET /repos/{owner}/{repo}/pulls/{pull_number}', { pull_number: pr.number });
+      if (revision(latest) !== revision(current)) throw new Retryable('PR changed during progress update');
+      if (latest.body === body) return latest;
+      if (latest.body !== current.body) throw new Retryable('PR description changed during progress update');
+      return undefined;
+    });
+  }
+  await gh.managedComment(pr.number, STATUS_MARKER, `[查看 PR 描述中的协作进度](${progressURL(gh, pr.number)})。`);
 }
 
 export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   const comments = await gh.list('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', { issue_number: pr.number });
   const existing = comments.find(c => c.user?.login === gh.env.BOT_LOGIN && c.user?.type === 'Bot' && c.body?.startsWith(READY_MARKER));
-  const status = comments.find(c => c.user?.login === gh.env.BOT_LOGIN && c.user?.type === 'Bot' && c.body?.startsWith(STATUS_MARKER));
-  const link = `https://github.com/${gh.repo}/pull/${pr.number}` + (status ? `#issuecomment-${status.id}` : '');
+  const link = progressURL(gh, pr.number);
   if (!result?.ready || pr.state !== 'open') {
-    const pending = [`${userReference(pr.user, true)} 此修改目前尚未满足集成条件。请查看[协作进度中的“接下来做什么”](${link})。`, '', ...integrationSteps(gh, pr, state, false)].join('\n').trimEnd();
-    if (existing || pr.state === 'open') await gh.managedComment(pr.number, READY_MARKER, pr.merged ? `此 PR 已集成。[查看结果](${link})。` : pr.state !== 'open' ? `此 PR 已关闭，未合并。[查看状态](${link})。重新打开后会检查最新提交的 CI 和审查结果。` : pending);
+    const pending = ['当前尚未满足合并条件，请查看协作进度。', '', `[查看待处理事项与检查进度](${link})。`, '', ...integrationSteps(gh, pr, state, false, false, result?.autoRequestValid)].join('\n').trimEnd();
+    if (existing) await gh.managedComment(pr.number, READY_MARKER, pr.merged ? `此 PR 已合并。[查看结果](${link})。` : pr.state !== 'open' ? `此 PR 已关闭，未合并。[查看状态](${link})。` : pending);
     if (pr.merged && pr.merge_commit_sha) {
       const message = integratedMessage(gh, pr);
       const job = state.release_job ?? state.integrate_job;
@@ -119,7 +168,7 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   const author = userReference(pr.user, true);
   const command = (name: string) => `\`${name}\``;
   const method = release ? 'Merge Commit' : 'Squash';
-  const lines = [`${author} 此变更已通过所有自动集成前检查，当前提交的人工批准也已满足。`, '', ...integrationSteps(gh, pr, state, true), '', `合并到 \`${plain(pr.base.ref)}\` 的最终提交信息：`, '', fenced(preview), '', '<details>', '<summary>提交说明与目标分支变化</summary>', '', `ℹ️ 项目也有需要人工确认的要求，详见[项目参与指南](${cfg.welcome.guide})。`, ''];
+  const lines = [`${author} 当前提交 \`${pr.head.sha.slice(0, 7)}\` 已满足 CI 和审查要求。`, '', `合并到 \`${plain(pr.base.ref)}\` 的最终提交信息：`, '', fenced(preview), '', ...integrationSteps(gh, pr, state, true, !release && cfg.merge.auto && !result.highRisk && await gh.maintainer(pr.user.login), result.autoRequestValid), '', `合并前请确认项目要求的其他人工检查已完成，详见[参与指南](${cfg.welcome.guide})。`, '', '<details>', '<summary>提交说明与目标分支变化</summary>', ''];
   if (!release) lines.push(`可以使用 ${command('/summary')} 调整提交摘要，由维护者使用 ${command('/contributor')} 和 ${command('/author')} 调整署名。`, '');
   const comparison = await gh.read('GET /repos/{owner}/{repo}/compare/{basehead}', { basehead: `${pr.head.sha}...${pr.base.sha}` });
   const count = Number(comparison.ahead_by) || 0;

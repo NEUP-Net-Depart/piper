@@ -42,7 +42,7 @@ export async function syncLabels(gh: GitHub, pr: PR, state: PRState, files: Chan
   else if (pr.state === 'open') {
     if (!pr.draft) desired.add('rfr');
     if (gate?.ready) desired.add('ready');
-    if (state.integration === 'requested') desired.add('auto');
+    if (state.integration === 'requested' && gate?.autoRequestValid !== false) desired.add('auto');
   }
   const current = new Map(pr.labels.map(l => [l.name.toLowerCase(), l.name]));
   const wanted = new Set([...desired].map(n => n.toLowerCase()));

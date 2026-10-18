@@ -106,7 +106,7 @@ it('updates merged state without relying on contribution history or webhook orde
   api.issueHistory = [{ number: 1, pull_request: {} },{ number: 2, pull_request: {} }];
   api.extra = async (route,args) => route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}' && args.pull_number === 2 ? { ...api.pr, number: 2, merged_at: '2026-10-15T00:00:00Z' } : undefined;
   await reconcilePR(gh,1); await reconcilePR(cold(gh,api),1);
-  expect(api.comments).toHaveLength(1); expect(api.comments[0].body).toContain('**已合并**');
+  expect(api.comments).toHaveLength(1); expect(api.pr.body).toContain('**已合并**');
   expect(api.calls.some(c => c.route === 'GET /repos/{owner}/{repo}/issues')).toBe(false);
 });
 
@@ -221,7 +221,7 @@ describe('Free plan request budget', () => {
     const job: Job = { id: 'budget-open', repo, installation: 1, kind: 'reconcile', number: 1, time: new Date().toISOString() };
     expect(await processJob(env,job,api)).toBe('ack');
     expect(api.pr.requested_reviewers).toEqual([{ login: 'bob' }]);
-    expect(api.comments.some(c => c.body.includes('Piper 协作状态'))).toBe(true);
+    expect(api.pr.body).toContain('### Piper Progress');
     expect(api.calls.length).toBeLessThanOrEqual(47);
   });
   it('processes integration, attribution, a tag and the completion receipt within the budget', async () => {

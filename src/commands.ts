@@ -13,7 +13,7 @@ export { HELP } from './help';
 export interface Command { name: string; args: string }
 export function commandResult({ name, args }: Command) {
   const results: Record<string, string> = {
-    summary: '提交摘要已更新。', author: '原作者归属已更新。', contributor: '贡献者归属已更新。',
+    summary: '提交摘要已更新。就绪后可在通知中核对最终提交信息。', author: '原作者署名已更新。', contributor: '共同作者署名已更新。',
     reviewers: '审查请求已更新。', label: '标签已更新。', tag: 'Tag 设置已完成。',
     integrate: ['cancel', 'manual'].includes(args) ? '已取消通过命令登记的自动集成请求。仓库在 `.piper.yml` 中配置的自动集成规则仍按配置生效。' : args === 'auto' ? '已为当前提交启用自动集成，条件满足后 Piper 会重新核验并尝试合并。新提交会使本次请求失效；可用 `/integrate manual` 或 `/integrate cancel` 取消。' : '请查看协作进度。'
   };
@@ -164,8 +164,8 @@ export async function executeCommand(gh: GitHub, number: number, actor: string, 
           value = identity(`${(person.name || person.login).trim()} <${person.email || `${person.id}+${person.login}@users.noreply.github.com`}>`);
         } else value = identity(requested);
         if ((metadata.contributors ?? []).filter(x => x.email.toLowerCase() !== value.email.toLowerCase()).length >= 20) throw new Denied('最多 20 位额外贡献者');
-        await save({ kind: 'contributor-add', value }); gh.commandResult = `已成功添加额外贡献者 ${safeText(value.name)} <${safeText(value.email)}>。`;
-      } else if (args.startsWith('remove ')) { await save({ kind: 'contributor-remove', value: args.slice(7) }); gh.commandResult = `已处理额外贡献者移除请求：${safeText(args.slice(7))}。原始提交中的作者归属仍会保留。`; }
+        await save({ kind: 'contributor-add', value }); gh.commandResult = `已添加共同作者 ${safeText(value.name)} <${safeText(value.email)}>。`;
+      } else if (args.startsWith('remove ')) { await save({ kind: 'contributor-remove', value: args.slice(7) }); gh.commandResult = `已移除额外共同作者：${safeText(args.slice(7))}。原始提交中的作者归属仍会保留。`; }
       else throw new Denied('添加共同作者用 /contributor add @用户名 或 /contributor add 姓名 <邮箱>；移除额外共同作者用 /contributor remove 邮箱。发送 /help contributor 查看示例。');
       return;
     }

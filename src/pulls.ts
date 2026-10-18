@@ -12,41 +12,61 @@ export const getPR = async (gh: GitHub, number: number) => gh.observePR(await gh
 export const filesFor = (gh: GitHub, number: number) => gh.list<{ filename: string; previous_filename?: string; status: string }>('GET /repos/{owner}/{repo}/pulls/{pull_number}/files', { pull_number: number });
 export const reviewsFor = (gh: GitHub, number: number) => gh.list<Review>('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', { pull_number: number });
 
-async function checkProgress(gh: GitHub, sha: string, required: string[]) {
+const CI_STARTUP_GRACE_MS = 5 * 60 * 1000;
+async function observedHeadAt(gh: GitHub, pr: PR) {
+  const key = 'ci-head-seen:' + pr.head.sha;
+  const saved = await gh.getRecord<{ at: number }>(pr.number, key);
+  if (saved) {
+    if (!Number.isFinite(saved.at) || saved.at < 0) throw new Denied('Invalid CI head observation record');
+    return saved.at;
+  }
+  const at = Date.now();
+  if (pr.state === 'open') return (await gh.record(pr.number, key, { at }))?.at ?? at;
+  return at;
+}
+async function checkProgress(gh: GitHub, sha: string, required: string[], observedAt?: number) {
+  const appIds = gh.config!.merge.trustedCheckAppIds;
+  if (!appIds.length) return {
+    reasons: ['未配置可信 CI 应用'], missing: false,
+    progress: [{ name: 'CI 来源', ready: false, detail: '尚未配置可信检查来源', owner: '维护者' as const,
+      action: '在 .piper.yml 的 merge.trustedCheckAppIds 中配置实际 CI 应用的 app.id；仅检查名称相同不足以确认来源。' }]
+  };
+  const awaitingStartup = observedAt !== undefined && Date.now() < observedAt + CI_STARTUP_GRACE_MS;
   const runs = await gh.list('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', { ref: sha, filter: 'latest' }, 'check_runs');
-  const statuses = await gh.list('GET /repos/{owner}/{repo}/commits/{ref}/statuses', { ref: sha });
   const reasons: string[] = [], progress: Progress[] = [];
+  let anyMissing = false;
   for (const name of required) {
-    const appIds = gh.config!.merge.trustedCheckAppIds;
-    const relevant = runs.filter(r => r.name === name && r.name !== 'Piper' && (!appIds.length || appIds.includes(r.app?.id)));
+    const relevant = runs.filter(r => r.name === name && r.name !== 'Piper' && appIds.includes(r.app?.id));
     const latest = new Map<number, any>();
     for (const run of relevant) if ((latest.get(run.app?.id)?.id ?? 0) < run.id) latest.set(run.app?.id, run);
-    const legacy = statuses.filter(s => s.context === name).sort((a, b) => b.id - a.id)[0];
     const current = [...latest.values()];
-    const useLegacy = !appIds.length && legacy;
-    const missing = !latest.size && (!legacy || appIds.length > 0);
-    const failed = current.some(r => r.head_sha !== sha || (r.status === 'completed' && r.conclusion !== 'success')) || (useLegacy && !['pending', 'success'].includes(legacy.state));
-    const pending = current.some(r => r.status !== 'completed') || (useLegacy && legacy.state === 'pending');
+    const missing = !latest.size;
+    anyMissing ||= missing;
+    const failed = current.some(r => r.head_sha !== sha || (r.status === 'completed' && r.conclusion !== 'success'));
+    const pending = current.some(r => r.status !== 'completed');
     if (missing) reasons.push(`CI 缺失：${name}`);
     else if (failed || pending) reasons.push(`CI 未成功：${name}`);
     progress.push({ name: `CI · ${name}`, ready: !missing && !failed && !pending,
-      detail: missing ? '尚未收到当前提交的必需检查' : failed ? '检查未通过' : pending ? '检查正在排队或运行' : '当前提交检查通过',
-      owner: missing ? '维护者' : failed ? '作者' : '等待',
-      action: missing ? `在 Checks 中确认 ${name} 已启动；没有运行记录时检查工作流配置和运行权限。` : failed ? `打开 Checks 中的 ${name} 查看日志，修复后推送到当前分支；同一 PR 会自动更新。` : pending ? `等待 ${name} 运行结束，Piper 会自动更新结果，无需重复发命令。` : undefined });
+      detail: missing ? awaitingStartup ? '等待 CI 启动（首次观察到当前提交后 5 分钟内）' : '尚未收到当前提交的必需检查' : failed ? '检查未通过' : pending ? '检查正在排队或运行' : '当前提交检查通过',
+      owner: missing ? awaitingStartup ? '等待' : '维护者' : failed ? '作者' : '等待',
+      action: missing ? awaitingStartup ? undefined : `在 Checks 中确认 ${name} 已启动；没有运行记录时检查工作流配置和运行权限。` : failed ? `打开 Checks 中的 ${name} 查看日志，修复后推送到当前分支；同一 PR 会自动更新。` : pending ? `等待 ${name} 运行结束。` : undefined });
   }
-  return { reasons, progress };
+  return { reasons, progress, missing: anyMissing };
 }
 export async function checks(gh: GitHub, sha: string, required: string[]): Promise<string[]> {
   return (await checkProgress(gh, sha, required)).reasons;
 }
 export async function gate(gh: GitHub, pr: PR, release = false, changedFiles?: Awaited<ReturnType<typeof filesFor>>): Promise<Gate> {
   const cfg = gh.config!;
+  const headSeenAt = await observedHeadAt(gh, pr);
+  const state = await prState(gh, pr);
+  const autoRequestValid = !(state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha) || !!state.integrate_actor && await gh.maintainer(state.integrate_actor);
   const reasons: string[] = [], progress: Progress[] = [];
   if (pr.state !== 'open' || pr.merged) reasons.push('PR 已关闭或合并');
   if (pr.draft) reasons.push('PR 仍为草稿');
   progress.push({ name: '准备审查', ready: !pr.draft, detail: pr.draft ? '仍为草稿' : '已标记为可审查', owner: '作者', action: pr.draft ? '代码准备好后，点击 PR 页面上的 Ready for review，开始正式审查。' : undefined });
   if (pr.mergeable !== true) reasons.push(pr.mergeable === null ? 'GitHub 尚未完成冲突检查' : '存在合并冲突');
-  progress.push({ name: '合并冲突', ready: pr.mergeable === true, detail: pr.mergeable === null ? 'GitHub 正在检查' : pr.mergeable ? '没有冲突' : '存在冲突', owner: pr.mergeable === null ? '等待' : '作者', action: pr.mergeable === null ? '等待 GitHub 完成冲突检查，无需重复发命令。' : !pr.mergeable ? '将目标分支的最新代码合入当前分支，解决冲突后推送到同一 PR。' : undefined });
+  progress.push({ name: '合并冲突', ready: pr.mergeable === true, detail: pr.mergeable === null ? 'GitHub 正在检查' : pr.mergeable ? '没有冲突' : '存在冲突', owner: pr.mergeable === null ? '等待' : '作者', action: pr.mergeable === null ? '等待 GitHub 完成冲突检查。' : !pr.mergeable ? '将目标分支的最新代码合入当前分支，解决冲突后推送到同一 PR。' : undefined });
   if (!['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state)) reasons.push(`GitHub 合并状态：${pr.mergeable_state}`);
   progress.push({ name: 'GitHub 分支规则', ready: ['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state), detail: ['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state) ? 'GitHub 允许继续核验 CI 和审查' : `等待满足 GitHub 要求（${pr.mergeable_state}）`, owner: '维护者', action: pr.mergeable === null ? undefined : '查看 PR 页面底部的合并区域，按提示补齐分支保护要求。' });
   const targetStart = reasons.length;
@@ -60,7 +80,7 @@ export async function gate(gh: GitHub, pr: PR, release = false, changedFiles?: A
     reasons.push('文件数量达到 GitHub 上限，需要人工处理');
     progress.push({ name: '变更范围', ready: false, detail: '文件数量达到 GitHub 上限', owner: '维护者', action: '拆分变更或人工处理文件清单。' });
   }
-  const policy = reviewPolicy(cfg, pr, files, (await prState(gh, pr)).metadata);
+  const policy = reviewPolicy(cfg, pr, files, state.metadata);
   const highRisk = release || policy.highRisk || files.some(f => cfg.merge.highRiskFiles.some(p => matches(p, f.filename) || (f.previous_filename && matches(p, f.previous_filename)))) || pr.labels.some(l => cfg.merge.highRiskLabels.includes(l.name));
   const reviews = await reviewsFor(gh, pr.number);
   const latest = new Map<string, Review>();
@@ -79,14 +99,42 @@ export async function gate(gh: GitHub, pr: PR, release = false, changedFiles?: A
   if (approved.length < minimum) reasons.push(`当前提交需要至少 ${minimum} 位有仓库写权限的人工审查者批准，目前已有 ${approved.length} 位。PR 作者和 Bot 不计入批准人数。`);
   progress.push({ name: '人工审查', ready: approved.length >= minimum && !requestedChanges.length,
     detail: `当前提交已获 ${approved.length}/${minimum} 位审查者批准${requestedChanges.length ? `；${requestedChanges.join('、')} 要求修改` : ''}${outdated.length ? `；${outdated.join('、')} 的批准对应旧提交` : ''}`,
-    owner: requestedChanges.length ? '作者' : outdated.length || pr.requested_reviewers.length ? '审查者' : '维护者',
-    action: requestedChanges.length ? '按 Files changed 中的审查意见修改并推送，再请审查者重新审查；普通回复不会解除“要求修改”。' : pr.draft ? undefined : outdated.length ? '新提交需要重新批准，请审查者查看最新代码并重新提交 Approve。' : pr.requested_reviewers.length ? '等待审查者在 Files changed 中选择 Review changes → Approve（批准）；普通评论不算批准。' : '当前没有待处理的审查请求。请用 /reviewers add 用户名 邀请有写权限的非作者审查者（用户名不带 @），或在 GitHub 的 Reviewers 中选择审查者。' });
-  const ci = await checkProgress(gh, pr.head.sha, release ? cfg.release.requiredChecks : cfg.merge.requiredChecks);
+    owner: requestedChanges.length ? '作者' : pr.requested_reviewers.length ? '审查者' : '维护者',
+    action: requestedChanges.length ? '按 Files changed 中的审查意见修改并推送，再请审查者重新审查；普通回复不会解除“要求修改”。' : pr.draft ? undefined : pr.requested_reviewers.length ? '在 Files changed → Review changes 中提交批准或修改意见。' : '当前没有待处理的审查请求。用 /reviewers add 用户名 邀请审查者，或在 GitHub 的 Reviewers 中选择。' });
+  const ci = await checkProgress(gh, pr.head.sha, release ? cfg.release.requiredChecks : cfg.merge.requiredChecks, headSeenAt);
   reasons.push(...ci.reasons); progress.push(...ci.progress);
+  if (ci.missing && Date.now() < headSeenAt + CI_STARTUP_GRACE_MS && pr.state === 'open') {
+    gh.ciStartupRefreshes.set(pr.number, { head: pr.head.sha, at: headSeenAt + CI_STARTUP_GRACE_MS });
+  } else gh.ciStartupRefreshes.delete(pr.number);
+  if (!release) {
+    const commits = await gh.list('GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', { pull_number: pr.number });
+    if (commits.length >= 250) {
+      reasons.push('提交数量达到 GitHub 的 250 条读取上限');
+      progress.push({ name: '提交信息', ready: false, detail: '提交数量达到 GitHub 的 250 条读取上限，无法确认完整预览和署名', owner: '维护者', action: '拆分 PR，或人工核对完整提交清单后处理合并。Piper 不会执行本次集成。' });
+    }
+  }
+  // Explain known blockers without changing GitHub's merge gate.
+  const branch = progress.find(p => p.name === 'GitHub 分支规则')!;
+  if (pr.mergeable_state === 'dirty') {
+    branch.detail = '存在合并冲突，解决后重新核对 GitHub 分支规则';
+    const conflict = progress.find(p => p.name === '合并冲突')!;
+    // The conflict row already tells the author what to do; keep this row in details.
+    branch.owner = conflict.owner === '作者' && !conflict.ready ? undefined : '作者';
+    branch.action = branch.owner ? '将目标分支的最新代码合入当前分支，解决冲突后推送到同一 PR。' : undefined;
+  } else if (pr.mergeable_state === 'behind') {
+    branch.owner = '作者';
+    branch.detail = '当前分支落后于目标分支，需要同步后重新检查';
+    branch.action = '将目标分支的最新代码同步到当前分支并推送，等待新提交的检查和审查。';
+  } else if (!branch.ready && (pr.mergeable === null || (pr.mergeable_state === 'blocked' && (ci.reasons.length > 0 || approved.length < minimum || requestedChanges.length > 0)))) {
+    // Specific check/review rows carry the action or wait; retain the aggregate only in details.
+    branch.owner = undefined;
+    branch.detail = pr.mergeable === null ? '等待 GitHub 完成冲突检查后重新核对分支规则' : '已知检查或审查尚未完成，完成后重新核对 GitHub 分支规则';
+    branch.action = undefined;
+  }
   if (policy.rules.length) progress.push({ name: '模块审查要求', ready: approved.length >= minimum, detail: `${policy.rules.map(r => r.name).join('、')}；至少 ${minimum} 位批准者` });
   const labelRules = policy.rules.map(rule => ({ name: rule.name, minimum: Math.max(cfg.merge.minApprovals, rule.minApprovals ?? 0), reviewers: rule.reviewers.length ? rule.reviewers : cfg.reviewers.pool,
     reason: [rule.titlePrefixes.some(p => pr.title.toLowerCase().startsWith(p.toLowerCase())) ? '标题前缀匹配' : '', rule.branches.some(p => matches(p, pr.head.ref)) ? `源分支 ${pr.head.ref}` : '', ...files.filter(f => rule.files.some(p => matches(p, f.filename) || (f.previous_filename && matches(p, f.previous_filename)))).slice(0, 3).map(f => `文件 ${f.filename}${f.previous_filename ? `（原路径 ${f.previous_filename}）` : ''}`)].filter(Boolean).join('；') }));
-  return { ready: !reasons.length, reasons, reviewers: approved.sort(), highRisk, progress, labelRules, reviewDetails: [...latest.values()].map(r => ({ login: r.user.login, sha: r.commit_id, state: r.state })) };
+  return { ready: !reasons.length, reasons, reviewers: approved.sort(), outdatedReviewers: outdated.sort(), autoRequestValid, highRisk, progress, labelRules, reviewDetails: [...latest.values()].map(r => ({ login: r.user.login, sha: r.commit_id, state: r.state })) };
 }
 export async function integrate(gh: GitHub, number: number, actor: string, expected: string, automatic = false, policyAuto = false) {
   return gh.fresh(() => integrateCurrent(gh, number, actor, expected, automatic, policyAuto));
@@ -108,7 +156,7 @@ async function integrateCurrent(gh: GitHub, number: number, actor: string, expec
   const result = await gate(gh, pr);
   if (policyAuto && result.highRisk) return false;
   if (!result.ready) {
-    if (!automatic) gh.commandResult = (state.integrate_mode === 'auto' ? '此 PR 将在以下条件满足后自动集成：' : '暂时无法执行集成请求：') + '\n' + result.reasons.map(x => `- ${safeText(x)}`).join('\n') + (state.integrate_mode === 'auto' ? '\n\n新提交会使本次请求失效；可用 `/integrate manual` 或 `/integrate cancel` 取消。' : '\n\n条件满足后请重新发送 `/integrate`；如需等待当前提交自动集成，可由有写权限的作者或维护者使用 `/integrate auto`。');
+    if (!automatic) gh.commandResult = (state.integrate_mode === 'auto' ? '此 PR 将在以下条件满足后自动集成：' : '无法执行 `/integrate`：') + '\n' + result.reasons.map(x => `- ${safeText(x)}`).join('\n') + (state.integrate_mode === 'auto' ? '\n\n新提交会使本次请求失效；可用 `/integrate manual` 或 `/integrate cancel` 取消。' : '\n\n条件满足后请重新发送 `/integrate`；如需等待当前提交自动集成，可由有写权限的作者或维护者使用 `/integrate auto`。');
     return false;
   }
   const commits = await gh.list('GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', { pull_number: number });
@@ -154,6 +202,24 @@ export async function welcome(gh: GitHub, number: number, user: { login: string;
 }
 export const timelineFor = (gh: GitHub, number: number) => gh.list('GET /repos/{owner}/{repo}/issues/{issue_number}/timeline', { issue_number: number });
 interface ReviewPlan { selected: string[]; at: string }
+function reviewerHistory(gh: GitHub, pr: PR, timeline: any[], reviews: Review[]) {
+  const lastContact = new Map<string, number>();
+  for (const event of timeline) if (['review_requested', 'review_request_removed'].includes(event.event) && event.requested_reviewer?.login) {
+    const login = event.requested_reviewer.login.toLowerCase(), at = Date.parse(event.created_at);
+    lastContact.set(login, Math.max(lastContact.get(login) ?? 0, Number.isFinite(at) ? at : Date.now()));
+  }
+  const latest = new Map<string, Review>();
+  for (const review of [...reviews].sort((a, b) => a.id - b.id)) {
+    const login = review.user.login.toLowerCase(), at = Date.parse(review.submitted_at);
+    if (Number.isFinite(at)) lastContact.set(login, Math.max(lastContact.get(login) ?? 0, at));
+    if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) latest.set(login, review);
+  }
+  const excluded = new Set([pr.user.login, ...pr.requested_reviewers.map(r => r.login)].map(x => x.toLowerCase()));
+  for (const [login, review] of latest) if (review.user.type === 'Bot' || review.state === 'CHANGES_REQUESTED' || review.state === 'APPROVED' && review.commit_id === pr.head.sha) excluded.add(login);
+  for (const [login, at] of lastContact) if (Date.now() - at < gh.config!.reviewers.rotateHours * 3600000) excluded.add(login);
+  return { excluded, lastContact };
+}
+
 export async function assign(gh: GitHub, pr: PR, specified?: string[], key = gh.job, policy?: ReturnType<typeof reviewPolicy>) {
   if (pr.draft || pr.state !== 'open') return [];
   const planKey = 'review-plan:' + key;
@@ -161,7 +227,7 @@ export async function assign(gh: GitHub, pr: PR, specified?: string[], key = gh.
   if (!plan) {
     const timeline = await timelineFor(gh, pr.number);
     const reviews = await reviewsFor(gh, pr.number);
-    const exclude = new Set([pr.user.login, ...pr.requested_reviewers.map(r => r.login), ...reviews.map(r => r.user.login), ...timeline.filter(t => t.event === 'review_requested').map(t => t.requested_reviewer?.login).filter(Boolean)].map(x => x.toLowerCase()));
+    const { excluded: exclude, lastContact } = reviewerHistory(gh, pr, timeline, reviews);
     const candidates: string[] = [];
     for (const person of specified ?? policy?.pool ?? gh.config!.reviewers.pool) {
       if (person.toLowerCase() === pr.user.login.toLowerCase()) { if (specified) throw new Denied('不能请求作者审查自己的 PR。请邀请其他有仓库写权限的人工审查者。'); else continue; }
@@ -170,7 +236,7 @@ export async function assign(gh: GitHub, pr: PR, specified?: string[], key = gh.
     }
     const open = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', { state: 'open' });
     const load = (login: string) => open.reduce((n,p) => n + Number(p.requested_reviewers.some(r => r.login.toLowerCase() === login.toLowerCase())), 0);
-    candidates.sort((a,b) => load(a) - load(b) || a.localeCompare(b));
+    candidates.sort((a,b) => Number(lastContact.has(a.toLowerCase())) - Number(lastContact.has(b.toLowerCase())) || load(a) - load(b) || (lastContact.get(a.toLowerCase()) ?? 0) - (lastContact.get(b.toLowerCase()) ?? 0) || a.localeCompare(b));
     const selected = candidates.slice(0, specified ? specified.length : Math.max(0, (policy?.count ?? gh.config!.reviewers.count) - pr.requested_reviewers.length));
     if (!selected.length) return [];
     plan = await gh.record(pr.number, planKey, { selected, at: new Date().toISOString() }) ?? { selected, at: new Date().toISOString() };
@@ -197,7 +263,7 @@ export async function removeReviewer(gh: GitHub, pr: PR, login: string, key: str
 export async function rotate(gh: GitHub, pr: PR, policy?: ReturnType<typeof reviewPolicy>) {
   if (pr.state !== 'open' || pr.draft) return;
   const timeline = await timelineFor(gh, pr.number), reviews = await reviewsFor(gh, pr.number);
-  for (const reviewer of pr.requested_reviewers) {
+  for (const reviewer of [...pr.requested_reviewers]) {
     const request = timeline.filter(e => e.event === 'review_requested' && e.requested_reviewer?.login.toLowerCase() === reviewer.login.toLowerCase()).sort((a,b) => b.id - a.id)[0];
     if (!request || !Number.isFinite(Date.parse(request.created_at))) continue;
     const requestedAt = Date.parse(request.created_at) / 1000;
@@ -207,8 +273,9 @@ export async function rotate(gh: GitHub, pr: PR, policy?: ReturnType<typeof revi
       const key = 'rotation:' + request.id;
       let transfer = await gh.getRecord<{ replacement: string }>(pr.number, key);
       if (!transfer) {
-        const excluded = new Set([pr.user.login, ...pr.requested_reviewers.map(r => r.login), ...reviews.map(r => r.user.login), ...timeline.filter(e => e.event === 'review_requested').map(e => e.requested_reviewer?.login).filter(Boolean)].map(x => x.toLowerCase()));
-        for (const person of policy?.pool ?? gh.config!.reviewers.pool) {
+        const { excluded, lastContact } = reviewerHistory(gh, pr, timeline, reviews);
+        const pool = [...(policy?.pool ?? gh.config!.reviewers.pool)].sort((a, b) => (lastContact.get(a.toLowerCase()) ?? 0) - (lastContact.get(b.toLowerCase()) ?? 0) || a.localeCompare(b));
+        for (const person of pool) {
           if (excluded.has(person.toLowerCase()) || !(await gh.maintainer(person))) continue;
           transfer = await gh.record(pr.number, key, { replacement: person }) ?? { replacement: person }; break;
         }
@@ -273,7 +340,7 @@ export async function reconcilePR(gh: GitHub, number: number, renderAll = false)
   const result = await gate(gh, pr, releasePR, pr.head.sha === filesHead && pr.base.sha === filesBase ? files : undefined);
   if (renderAll) {
     if (!releasePR && result.ready) {
-      if (state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha && state.integrate_actor) {
+      if (result.autoRequestValid && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha && state.integrate_actor) {
         await integrate(gh, number, state.integrate_actor, pr.head.sha, true);
         return refreshPR(gh, number);
       }
@@ -286,7 +353,7 @@ export async function reconcilePR(gh: GitHub, number: number, renderAll = false)
   }
   await summarize(gh, pr, state, result);
   if (releasePR) return false;
-  if (state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha && state.integrate_actor) return integrate(gh, number, state.integrate_actor, pr.head.sha, true);
+  if (result.autoRequestValid && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha && state.integrate_actor) return integrate(gh, number, state.integrate_actor, pr.head.sha, true);
   if (gh.config!.merge.auto && result.ready && !result.highRisk && await gh.maintainer(pr.user.login)) return integrate(gh, number, pr.user.login, pr.head.sha, true, true);
   return false;
 }

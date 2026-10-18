@@ -5,7 +5,7 @@ import type { Env, Job, PR } from '../src/types';
 
 export const repo = 'NEUP-Net-Depart/Pioneer-appointment-system';
 export function testEnv(overrides: Partial<Env> = {}): Env {
-  return { TASKS: { send: vi.fn(async () => undefined) } as unknown as Queue<Job>, ENVIRONMENT: 'production', APP_ID: '1', APP_PRIVATE_KEY: 'unused', WEBHOOK_SECRET: 'test-secret', ADMIN_TOKEN: 'a'.repeat(40), BOT_LOGIN: 'piper[bot]', ALLOWED_REPOSITORIES: repo, DRY_RUN: 'false', EMERGENCY_STOP: 'false', STOPPED_REPOSITORIES: '', ORG_DEFAULTS: '{}', PUBLIC_URL: 'https://piper.example.test', ...overrides };
+  return { TASKS: { send: vi.fn(async () => undefined) } as unknown as Queue<Job>, ENVIRONMENT: 'production', APP_ID: '1', APP_PRIVATE_KEY: 'unused', WEBHOOK_SECRET: 'test-secret', ADMIN_TOKEN: 'a'.repeat(40), BOT_LOGIN: 'piper[bot]', ALLOWED_REPOSITORIES: repo, DRY_RUN: 'false', EMERGENCY_STOP: 'false', STOPPED_REPOSITORIES: '', ORG_DEFAULTS: '{"merge":{"trustedCheckAppIds":[1]}}', PUBLIC_URL: 'https://piper.example.test', ...overrides };
 }
 export function pull(overrides: Partial<PR> = {}): PR {
   return { number: 1, title: 'fix: repair booking', body: '', state: 'open', draft: false, user: { login: 'alice', type: 'User' }, head: { sha: 'abc123', ref: 'fix/booking', repo: { full_name: repo } }, base: { sha: 'base123', ref: 'dev', repo: { full_name: repo } }, merged: false, merge_commit_sha: null, mergeable: true, mergeable_state: 'clean', requested_reviewers: [], labels: [], ...overrides };
@@ -40,6 +40,7 @@ export class FakeGitHub implements Requester {
     if (route.includes('/collaborators/{username}/permission')) return { data: { permission: this.permissions[args.username] ?? 'none' } };
     if (route === 'GET /repos/{owner}/{repo}/contents/{path}') return { data: { type: 'file', encoding: 'base64', content: btoa(this.config), size: this.config.length, sha: 'config123' } };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: structuredClone(this.pr) };
+    if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') { this.pr.body = args.body; return { data: structuredClone(this.pr) }; }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files') return { data: this.files };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews') return { data: this.reviews };
     if (route.endsWith('/check-runs')) return { data: { check_runs: this.runs } };
@@ -95,7 +96,7 @@ export class FakeGitHub implements Requester {
 export async function fixture(config = '', overrides: Partial<Env> = {}) {
   const environment = testEnv(overrides), api = new FakeGitHub();
   const gh = new GitHub(environment, repo, 'test-job', api);
-  gh.config = parseConfig('{}', 'enabled: true\ndryRun: false\n' + config);
+  gh.config = parseConfig(environment.ORG_DEFAULTS, 'enabled: true\ndryRun: false\n' + config);
   gh.commandOrder = 1;
   return { env: environment, api, gh };
 }

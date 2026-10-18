@@ -53,7 +53,7 @@ export interface Identity { name: string; email: string }
 export interface Metadata { summary?: string; author?: Identity; contributors?: Identity[]; tag?: string; requiredReviews?: number; labels?: Record<string, { name: string; mode: 'add' | 'remove' | 'auto'; at: string }> }
 export interface Review { id: number; user: { login: string; type: string }; state: string; commit_id: string; submitted_at: string }
 export interface Progress { name: string; ready: boolean; detail: string; action?: string; owner?: '作者' | '审查者' | '维护者' | '等待' }
-export interface Gate { ready: boolean; reasons: string[]; reviewers: string[]; highRisk: boolean; progress: Progress[]; reviewDetails?: { login: string; sha: string; state: string }[]; labelRules?: { name: string; reason: string; minimum: number; reviewers: string[] }[] }
+export interface Gate { ready: boolean; reasons: string[]; reviewers: string[]; highRisk: boolean; progress: Progress[]; outdatedReviewers?: string[]; autoRequestValid?: boolean; reviewDetails?: { login: string; sha: string; state: string }[]; labelRules?: { name: string; reason: string; minimum: number; reviewers: string[] }[] }
 export class Denied extends Error {}
 export class Retryable extends Error {}
 export const epoch = () => Math.floor(Date.now() / 1000);

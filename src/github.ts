@@ -14,6 +14,7 @@ export class GitHub {
   commandOrder = 0;
   commandName?: string;
   commandResult?: string;
+  readonly ciStartupRefreshes = new Map<number, { head: string; at: number }>();
   private cacheEnabled = false;
   private readonly lists = new Map<string, Promise<any[]>>();
   private readonly observedPRs = new Map<number, string>();
@@ -129,7 +130,7 @@ export class GitHub {
     const matches = (c: any) => c.user?.login === this.env.BOT_LOGIN && c.user?.type === 'Bot' && c.body?.startsWith(marker);
     const existing = comments.filter(matches).sort((a,b) => a.id - b.id)[0];
     const expectedBody = existing?.body;
-    const initial = marker === STATUS_MARKER ? '### Piper 协作状态\n\n正在检查 PR，结果会在本条评论中更新。' : `Piper · \`/${this.commandName ?? 'command'}\``;
+    const initial = marker === STATUS_MARKER ? `[查看 PR 描述中的协作进度](https://github.com/${this.repo}/pull/${number}#piper-progress)。` : `Piper · \`/${this.commandName ?? 'command'}\``;
     const view = visible === undefined ? existing ? visibleComment(existing.body) : initial : visible;
     const body = commentBody(`${marker}\n${view.startsWith(marker) ? view.slice(marker.length).trimStart() : view}`, [...recordMarkers(existing?.body ?? ''), ...(record ? [encodeRecord(this.repo, number, record.key, record.value)] : [])]);
     if (existing?.body === body) return existing;

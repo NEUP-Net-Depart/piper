@@ -12,11 +12,11 @@ describe('shared PR refresh and request cache', () => {
   it('renders all views together and reads comments, files, reviews and checks once on an unchanged PR', async () => {
     const { env, api } = await fixture();
     expect(await processJob(env, task('initial'), api)).toBe('ack');
-    expect(api.comments.map(c => c.body).join('\n')).toContain('所有自动集成前检查');
+    expect(api.comments.map(c => c.body).join('\n')).toContain('已满足 CI 和审查要求');
     api.calls = [];
     expect(await processJob(env, task('unchanged'), api)).toBe('ack');
     expect(api.writes()).toHaveLength(0);
-    for (const path of [comments, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files', 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs', 'GET /repos/{owner}/{repo}/commits/{ref}/statuses']) expect(api.calls.filter(c => c.route === path)).toHaveLength(1);
+    for (const path of [comments, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files', 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', 'GET /repos/{owner}/{repo}/commits/{ref}/check-runs']) expect(api.calls.filter(c => c.route === path)).toHaveLength(1);
     expect(api.calls.length).toBeLessThanOrEqual(18);
     expect(env.TASKS.send).not.toHaveBeenCalled();
   });

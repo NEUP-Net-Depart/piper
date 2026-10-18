@@ -17,13 +17,13 @@ describe('compact collaboration comments', () => {
     api.config = 'enabled: true\ndryRun: false\nreviewers:\n  pool: [bob]\n  count: 1';
     const job: Job = { id: 'opened', repo, installation: 1, kind: 'reconcile', number: 1, time: new Date().toISOString() };
     expect(await processJob(env, job, api)).toBe('ack');
-    expect(bots(api)).toHaveLength(2);
+    expect(bots(api)).toHaveLength(1);
     const main = bots(api)[0]; expect(api.comments[0].id).toBe(main.id);
     expect(main.body.startsWith(STATUS_MARKER)).toBe(true);
     expect(main.body).toContain(gh.config!.welcome.pr);
     expect((await gh.records(1)).map(r => r.key)).toContain('review-plan:opened');
     expect(api.pr.requested_reviewers).toEqual([{ login: 'bob' }]);
-    expect(await processJob(env, job, api)).toBe('ack'); expect(bots(api)).toHaveLength(2);
+    expect(await processJob(env, job, api)).toBe('ack'); expect(bots(api)).toHaveLength(1);
   });
 
   it('keeps plans in the status and creates one final result with its completion receipt', async () => {
@@ -43,7 +43,7 @@ describe('compact collaboration comments', () => {
     expect((await prState(gh, api.pr)).integrate_head).toBe('abc123');
     const writes = api.writes().length;
     expect(await processJob(env, job, api)).toBe('ack'); expect(api.writes()).toHaveLength(writes);
-    expect(bots(api)).toHaveLength(3); expect(bots(api)[1].id).toBe(reply.id);
+    expect(bots(api)).toHaveLength(2); expect(bots(api)[1].id).toBe(reply.id);
     expect((await gh.records(1)).filter(r => r.key.endsWith(job.id))).toHaveLength(3);
   });
 
@@ -66,7 +66,7 @@ describe('compact collaboration comments', () => {
     const staged = new GitHub(env, repo, job.id, api); staged.config = (await fixture()).gh.config; staged.commandName = 'integrate';
     await staged.ensureStatus(1); await staged.record(1, 'command-head:' + job.id, { head: 'abc123' });
     expect(await processJob(env, job, api)).toBe('ack');
-    expect(bots(api)).toHaveLength(2); expect(visibleComment(bots(api)[1].body)).toContain('请求未完成');
+    expect(bots(api)).toHaveLength(2); expect(visibleComment(bots(api)[1].body)).toContain('无法执行');
     const records = decodeRecords(bots(api)[0], env.BOT_LOGIN, repo, 1);
     expect(records.find(r => r.key === 'command-head:' + job.id)?.value).toEqual({ head: 'abc123' });
     expect(records.some(r => r.key.startsWith('command-done:'))).toBe(false);

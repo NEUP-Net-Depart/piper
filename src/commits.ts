@@ -21,5 +21,9 @@ export function integratedMessage(gh: Pick<GitHub, 'repo' | 'config' | 'env'>, p
   const welcome = gh.config!.welcome;
   const image = welcome.image.startsWith('/') ? new URL(welcome.image, gh.env.PUBLIC_URL).href : welcome.image;
   const release = gh.config!.release.enabled && pr.base.ref === gh.config!.release.target;
-  return addressUser(pr.user, [safeText(welcome.merged), `已集成到 \`${safeText(pr.base.ref)}\`：[${sha?.slice(0, 12)}](https://github.com/${gh.repo}/commit/${sha})`, release ? '代码已合并；版本是否已发布，请在新评论中发送 `/release status` 查询。Piper 仅在部署成功后创建版本 Tag 和 Release。' : '此 PR 的合并已完成，无需再次发送集成命令。', welcome.merged && image ? `![庆祝合并](${image})` : ''].filter(Boolean).join('\n\n'));
+  return addressUser(pr.user, [
+    `已集成到 \`${safeText(pr.base.ref)}\`：[${sha?.slice(0, 12)}](https://github.com/${gh.repo}/commit/${sha})。`,
+    release ? '代码已合并；部署成功后创建版本 Tag 和 Release。发布进度：`/release status`。' : safeText(welcome.merged),
+    !release && welcome.merged && image ? `![庆祝合并](${image})` : ''
+  ].filter(Boolean).join('\n\n'));
 }

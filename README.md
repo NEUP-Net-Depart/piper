@@ -4,6 +4,8 @@ Piper 是运行在 Cloudflare Workers 上的 GitHub App，负责 PR 审查分配
 
 本文包含[机器人部署](#机器人部署)和[仓库 YAML 配置](#仓库-yaml-配置)。使用机器人时，在 Issue 或 PR 中新建评论发送 `/help`；单项用法用 `/help integrate` 等，完整列表用 `/help all`。
 
+PR 描述底部的 Piper Progress 自动更新协作状态和检查清单。Piper 维护 `<!-- piper:progress -->` 与 `<!-- piper:progress:end -->` 之间的内容，保留作者原文。就绪通知包含最终提交信息和合并命令；新提交或检查失败时，通知更新为进度链接。
+
 ## 机器人部署
 
 ### 1. 准备环境
@@ -66,7 +68,7 @@ node scripts/deploy-config.mjs
 npx wrangler deploy --env production --config .piper.deploy.jsonc
 ```
 
-脚本从 `wrangler.jsonc` 生成 `.piper.deploy.jsonc`，并填写 `production` 的部署变量。每次修改变量后重新运行脚本，不要复用旧的生成文件。`PIPER_WORKER_URL` 必须是实际可访问的 HTTPS origin，不含路径、查询参数或用户名密码；默认庆祝图片随 `public/` 部署到这个地址下。
+脚本从 `wrangler.jsonc` 生成 `.piper.deploy.jsonc`，并填写 `production` 的部署变量。每次修改变量后重新运行脚本，不要复用旧的生成文件。`PIPER_WORKER_URL` 必须是实际可访问的 HTTPS origin，不含路径、查询参数或用户名密码；`public/` 中的静态资源部署到这个地址下。
 
 | 部署变量 | Worker 中的名称 | 用途 |
 | --- | --- | --- |
@@ -95,7 +97,7 @@ npx wrangler secret put ADMIN_TOKEN --env production --config .piper.deploy.json
 2. 启用 GitHub App Webhook，执行 `node scripts/smoke.mjs`。它通过 `PIPER_WORKER_URL` 检查健康接口、无签名 Webhook 和未认证管理请求的拒绝行为，不执行审查、合并或发布。
 3. 查看 GitHub App 的 Recent deliveries 和 Worker 日志，确认事件被接收、配置已加载。Dry-run 是上线前的预演开关：只记录拟执行操作，不发评论、不修改仓库，也不保存待执行命令意图。
 4. **正式启用：将部署变量 `PIPER_DRY_RUN` 和默认分支 `.piper.yml` 的 `dryRun` 都设为 `false`，重新生成配置并部署 Worker。** 此前在 Dry-run 中发送的命令需要新建评论重发。
-5. 在 Issue 或 PR 中新建评论发送 `/help`，确认机器人回复；后续根据 PR 协作状态中的“接下来做什么”推进审查和合并。
+5. 在 Issue 或 PR 中新建评论发送 `/help`，确认机器人回复；根据 PR 描述中的待处理事项、CI 和审查进度推进合并。
 
 ### 6. 使用 GitHub Actions 部署
 
@@ -122,7 +124,7 @@ Piper 仓库的 `.github/workflows/ci.yml` 在 push / PR 时检查代码；`.git
 | 发布部署失败 | 查看工作流日志，修复并重跑同一合并提交的工作流，Piper 会重新核验 |
 | 命令评论或提交已改变 | 在新评论中重新发送命令 |
 
-管理接口使用 `Authorization: Bearer ADMIN_TOKEN`：`GET /admin/status` 查看环境开关，`GET /admin/audit?repo=owner/repo&number=1` 读取 Bot 回执，`POST /admin/reconcile?repo=owner/repo` 请求状态重扫。重扫不会重放命令。保留 Bot 评论中的隐藏回执，并监控 Worker 日志、队列积压和 DLQ。停用不撤回已发出的请求；环境停用期间消息可能继续重试并进入 DLQ。
+管理接口使用 `Authorization: Bearer ADMIN_TOKEN`：`GET /admin/status` 查看环境开关，`GET /admin/audit?repo=owner/repo&number=1` 读取 Bot 回执，`POST /admin/reconcile?repo=owner/repo` 请求状态重扫。重扫不会重放命令。保留 Bot 评论中的隐藏回执，并监控 Worker 日志、队列积压和 DLQ。恢复记录只从 Piper 自己的 Bot 评论读取，PR 描述中的复选框不作为合并授权依据。停用不撤回已发出的请求；环境停用期间消息可能继续重试并进入 DLQ。
 
 ## 仓库 YAML 配置
 
@@ -143,10 +145,10 @@ enabled: true
 dryRun: true
 
 welcome:
-  issue: '感谢提交 Issue！请补充复现步骤和预期结果。'
-  pr: '感谢提交 PR！请查看下方“接下来做什么”。'
-  merged: '🎉 你的 PR 已合并，感谢贡献！'
-  image: /assets/neurobounce.gif
+  issue: '感谢反馈。请按 Issue 模板补充问题信息。'
+  pr: ''
+  merged: '感谢贡献。'
+  image: ''
   guide: https://github.com/YOUR_ORG/YOUR_REPO
 
 reviewers:
@@ -157,7 +159,7 @@ reviewers:
 
 merge:
   requiredChecks: [verify]
-  trustedCheckAppIds: []
+  trustedCheckAppIds: [] # 必须填写实际 CI 应用的 app.id；空列表会阻止集成
   minApprovals: 1
   auto: false
   allowedBases: [dev]
@@ -202,15 +204,15 @@ release:
 | --- | --- |
 | `enabled` | 默认 `false`；开启该仓库的 Piper 处理 |
 | `dryRun` | 默认 `true`；只记录拟执行操作 |
-| `welcome.issue` / `pr` / `merged` | 首次 Issue 欢迎、PR 状态开头、合并祝贺；内置中文文案，可设空字符串关闭相应文字，单项最多 10,000 字符 |
-| `welcome.image` | 默认 `/assets/neurobounce.gif`；接受 Worker 的 `/assets/文件名` 或 HTTPS 图片地址，空字符串关闭图片；`merged` 为空时也不展示图片 |
+| `welcome.issue` / `pr` / `merged` | 首次 Issue 回复、PR 状态补充说明、普通 PR 合并致谢；内置中文文案，可设空字符串关闭相应文字，单项最多 10,000 字符 |
+| `welcome.image` | 默认关闭；接受 Worker 的 `/assets/文件名` 或 HTTPS 图片地址，空字符串关闭图片；`merged` 为空时也不展示图片 |
 | `welcome.guide` | 参与指南 URL；内置值为预约系统 Issue #39，接入其他项目时应覆盖 |
 | `reviewers.pool` | 默认 `[]`，最多 30 个 GitHub 用户名，不带 `@`、不能重复；候选人须有写权限且不是 PR 作者 |
 | `reviewers.count` | 默认 `1`，范围 0–10；自动请求审查的人数，`0` 关闭仓库级自动分配，不等于无需批准；模块可提高人数 |
 | `reviewers.remindHours` | 默认 `24`，范围 1–168 小时；未回应时提醒 |
 | `reviewers.rotateHours` | 默认 `48`，范围 2–336 小时，必须大于提醒时间；未回应时尝试换人，无可用替补时提示维护者交接 |
 | `merge.requiredChecks` | 默认 `[verify]`，1–30 个必需检查名称；填写 GitHub Checks 中的名称，不是工作流文件名；要求检查成功，跳过或 neutral 不算成功 |
-| `merge.trustedCheckAppIds` | 默认 `[]`，接受现有 Check Run / commit status；配置数字 ID 后仅接受这些 App 的 Check Run，取值为 Check Run 的 `app.id` |
+| `merge.trustedCheckAppIds` | 默认 `[]`，拒绝通过 CI 门槛；必须填写可信 CI 的 Check Run `app.id`，仅接受这些 App 的检查，不接受无法绑定 App 身份的 commit status |
 | `merge.minApprovals` | 默认 `1`，范围 1–10；当前提交所需人工批准数，作者、Bot 和旧提交的批准不计入 |
 | `merge.auto` | 默认 `false`；开启后可自动合并有写权限作者的非高风险 PR，仍检查 CI、审查和 GitHub 分支规则 |
 | `merge.allowedBases` | 默认 `[dev]`；普通 Squash 合并允许的目标分支，至少一项 |
@@ -225,7 +227,11 @@ release:
 | `release.deploymentWorkflow` / `deploymentJob` | 默认 `ci.yml` / `release`；目标分支 push 后运行的工作流文件名和实际部署 Job 名称 |
 | `release.requiredChecks` / `minApprovals` | 默认 `[verify]` / `1`；发布合并前的检查和批准要求，批准数还须满足仓库、模块及命令设置的更高要求 |
 
-审查提醒和换人基于 GitHub 的审查请求时间线；15 分钟 Cron 和队列等待可能使实际提醒晚于配置时间。`merge.auto` 是独立的仓库规则，`/integrate cancel` 仅取消命令登记的自动请求，不会关闭它。
+`merge.trustedCheckAppIds` 须使用已知可信 CI 运行记录中的 `app.id`，也适用于发布 PR。缺少必需检查时，从首次观察到当前提交起等待五分钟，再通过延迟队列任务重新检查；重启、评论和标签更新不会重置计时，队列重试或服务停用可能使实际检查延后。普通 PR 达到 250 个提交的读取上限时，Piper 停止集成并提示人工处理。
+
+当前审查责任以 GitHub 待处理审查请求为准。审查提醒和换人基于审查请求时间线；15 分钟 Cron 和队列等待可能使实际提醒晚于配置时间。历史审查者在距离最近一次请求、撤销或审查达到 `rotateHours` 后可重新进入候选池，优先选择未请求过的人；排除当前审查者、作者、当前批准者及要求修改者。
+
+自动集成请求人的写权限在刷新和执行时复核；失权后移除自动集成标签并提示重新请求。`merge.auto` 是独立的仓库规则，`/integrate cancel` 仅取消命令登记的自动请求，不会关闭它。
 
 ### 标签与模块审查规则
 

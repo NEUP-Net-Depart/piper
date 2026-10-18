@@ -7,10 +7,10 @@ const login = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
 export const branch = z.string().min(1).max(150).refine(x => !/[\s~^:?*[\\]/.test(x) && !x.includes('..') && !x.includes('@{') && !x.includes('//') && !x.endsWith('.lock') && !/[/.]$/.test(x) && !x.startsWith('/') && x.split('/').every(p => !p.startsWith('.')));
 const pattern = z.string().min(1).max(200);
 const welcomeDefaults = {
-  issue: '感谢你在这里提交第一个 issue！请按 issue 模板填写信息。',
-  pr: '👋 感谢提交 PR！先看下方“接下来做什么”；代码、检查和审查有变化时，这条评论会自动更新。',
-  merged: '🎉 你的 PR 已合并！感谢你为项目贡献代码，期待下一次合作！',
-  image: '/assets/neurobounce.gif',
+  issue: '感谢反馈。请按 Issue 模板补充问题信息。',
+  pr: '',
+  merged: '感谢贡献。',
+  image: '',
   guide: 'https://github.com/NEUP-Net-Depart/Pioneer-appointment-system/issues/39'
 };
 export const configSchema = z.object({

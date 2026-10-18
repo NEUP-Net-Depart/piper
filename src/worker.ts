@@ -88,13 +88,24 @@ export async function processJob(env: Env, job: Job, api?: Requester): Promise<'
     if (!gh.config.enabled) { gh.audit('job','disabled'); return 'ack'; }
     if (job.checkName && !gh.config.merge.requiredChecks.includes(job.checkName) && !gh.config.release.requiredChecks.includes(job.checkName)) { gh.audit('job', 'irrelevant-check'); return 'ack'; }
     gh.audit('configuration','loaded',{ ref: repo.default_branch, sha: file.sha, defaultsHash: await sha256(env.ORG_DEFAULTS) });
-    await dispatch(gh,job); gh.audit('job','completed', { requests: gh.requests }); return 'ack';
+    await dispatch(gh,job);
+    if (!gh.dryRun) for (const [number, retry] of gh.ciStartupRefreshes) {
+      const key = 'ci-startup-queued:' + retry.head;
+      if (await gh.getRecord(number, key)) continue;
+      // Send before recording the receipt: a lost acknowledgement may duplicate a harmless refresh,
+      // but a failed send must never leave a receipt that suppresses the retry.
+      await env.TASKS.send({ id: `ci-startup:${gh.repo}:${number}:${retry.head}`, repo: gh.repo, installation: job.installation,
+        kind: 'status', number, head: retry.head, time: new Date(retry.at).toISOString() },
+      { delaySeconds: Math.max(0, Math.ceil((retry.at - Date.now()) / 1000)) });
+      await gh.record(number, key, { at: retry.at });
+    }
+    gh.audit('job','completed', { requests: gh.requests }); return 'ack';
   } catch(e) {
     const denied = e instanceof Denied;
     const message = e instanceof Error ? e.message.slice(0,1000) : 'Unknown failure';
     gh?.audit('job',denied ? 'denied' : 'retry',{ message });
     if (denied && gh?.config?.enabled && job.kind === 'command' && gh.actor !== 'piper') {
-      try { await gh.reply(job.number!, '请求未完成：' + message.replace(/@/g,'@\u200b') + '\n\n请按提示新建评论重试，或请仓库维护者协助。发送 `/help` 查看命令。', gh.actor); }
+      try { await gh.reply(job.number!, `无法执行${gh.commandName ? ` \`/${gh.commandName}\`` : '命令'}：` + message.replace(/@/g,'@\u200b'), gh.actor); }
       catch { return 'retry'; }
     }
     return denied ? 'ack' : 'retry';

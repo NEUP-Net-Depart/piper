@@ -19,23 +19,21 @@ async function commandJob(api: FakeGitHub, body: string, actor = 'alice'): Promi
 }
 
 describe('targeted mentions', () => {
-  it('addresses the author in pending and ready notices while keeping reviewer lists quiet', async () => {
+  it('only addresses the author once ready while keeping pending status and reviewer lists quiet', async () => {
     const { gh, api } = await fixture('reviewers:\n  count: 0\nlabels:\n  - name: area/test\n    files: ["src/**"]\n    reviewers: [bob, carol]');
     api.reviews = []; api.pr.requested_reviewers = [{ login: 'bob' }];
     await reconcilePR(gh, 1); await notifyPR(gh, 1);
-    const status = bots(api).find(c => c.body.startsWith(STATUS_MARKER))!;
-    const notice = bots(api).find(c => c.body.startsWith(READY_MARKER))!;
-    expect(status.body).toContain('[bob](https://github.com/bob)');
-    expect(status.body).toContain('[carol](https://github.com/carol)');
-    expect(mentions(status.body)).toEqual([]);
-    expect(mentions(notice.body)).toEqual(['alice']);
-    expect(notice.body).toContain('目前尚未满足');
+    expect(api.pr.body).toContain('[bob](https://github.com/bob)');
+    expect(api.pr.body).toContain('[carol](https://github.com/carol)');
+    expect(mentions(api.pr.body!)).toEqual([]);
+    expect(bots(api).some(c => c.body.startsWith(READY_MARKER))).toBe(false);
     const writes = api.writes().length;
     await notifyPR(cold(gh, api), 1); expect(api.writes()).toHaveLength(writes);
     api.reviews = [{ id: 1, user: { login: 'bob', type: 'User' }, state: 'APPROVED', commit_id: api.pr.head.sha, submitted_at: new Date().toISOString() }];
     await notifyPR(cold(gh, api), 1);
+    const notice = bots(api).find(c => c.body.startsWith(READY_MARKER))!;
     expect(bots(api).filter(c => c.body.startsWith(READY_MARKER))).toHaveLength(1);
-    expect(notice.body).toContain('已通过所有自动集成前检查');
+    expect(notice.body).toContain('已满足 CI 和审查要求');
     expect(mentions(notice.body)).toEqual(['alice']);
     const readyWrites = api.writes().length;
     await notifyPR(cold(gh, api), 1); expect(api.writes()).toHaveLength(readyWrites);
@@ -47,7 +45,7 @@ describe('targeted mentions', () => {
     expect(await processJob(env, job, api)).toBe('ack');
     const reply = bots(api).find(c => !c.body.startsWith(STATUS_MARKER))!;
     expect(mentions(reply.body)).toEqual(['alice']);
-    if (body === '/help') expect(reply.body).toContain('`/help contributor`');
+    if (body === '/help') expect(reply.body).toContain('`/help 命令名`');
     if (body === '/help contributor') expect(reply.body).toContain('/contributor add @login');
     expect(reply.body).not.toContain('@outsider');
     const writes = api.writes().length;
@@ -63,12 +61,11 @@ describe('targeted mentions', () => {
     expect(api.pr.merged).toBe(true);
     const refresh: Job = { ...job, id: 'merged-notice', kind: 'notice' };
     expect(await processJob(env, refresh, api)).toBe('ack');
-    const results = bots(api).filter(c => visibleComment(c.body).includes('你的 PR 已合并'));
+    const results = bots(api).filter(c => visibleComment(c.body).includes('已集成到'));
     expect(results).toHaveLength(1);
     expect(mentions(results[0].body)).toEqual(actor === 'alice' ? ['alice'] : ['carol', 'alice']);
-    expect(results[0].body.match(/!\[庆祝合并\]/g)).toHaveLength(1);
-    expect(results[0].body).toContain('🎉');
-    expect(results[0].body).toContain('/assets/neurobounce.gif');
+    expect(results[0].body).not.toContain('![庆祝合并]');
+    expect(results[0].body).not.toContain('🎉');
     const writes = api.writes().length;
     expect(await processJob(env, refresh, api)).toBe('ack'); expect(api.writes()).toHaveLength(writes);
   });
@@ -112,7 +109,7 @@ describe('targeted mentions', () => {
     const failures = bots(api).filter(c => c.body.includes('发布部署未成功'));
     expect(failures).toHaveLength(1); expect(mentions(failures[0].body)).toEqual(['carol']);
     await notifyPR(cold(gh, api), 1); await notifyPR(cold(gh, api), 1);
-    const results = bots(api).filter(c => c.body.includes('你的 PR 已合并'));
+    const results = bots(api).filter(c => c.body.includes('已集成到'));
     expect(results).toHaveLength(1); expect(mentions(results[0].body)).toEqual(['carol']);
     expect(api.tags.size).toBe(0); expect(api.releases).toHaveLength(0);
   });

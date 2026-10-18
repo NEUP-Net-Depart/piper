@@ -89,7 +89,7 @@ describe('repository module and workflow labels', () => {
   it('routes module reviews and uses the highest matching approval requirement', async () => {
     const { gh, api } = await fixture(configured); api.files = [{ filename: 'src/booking/app.ts' }]; api.reviews = [];
     await reconcilePR(gh, 1); expect(api.pr.requested_reviewers).toEqual([{ login: 'carol' }]);
-    const status = api.comments.find(c => c.body.startsWith(STATUS_MARKER)).body;
+    const status = api.pr.body;
     expect(status).toContain('文件 src/booking/app.ts'); expect(status).toContain('至少 2 位批准者');
     expect(reviewPolicy(gh.config!, api.pr, api.files).minimum).toBe(2);
     await expect(command(gh, api, 1, '/reviewers 1')).rejects.toThrow('不能低于');
@@ -128,13 +128,13 @@ describe('repository module and workflow labels', () => {
 });
 
 describe('welcoming and command interaction', () => {
-  it('welcomes every PR and congratulates every merged PR once with the actual target and image', async () => {
-    const { gh, api } = await fixture(); api.issueHistory = [{ number: 0, pull_request: {} }];
-    await reconcilePR(gh, 1); expect(api.comments[0].body).toContain('感谢提交 PR');
+  it('keeps the merge result concise and supports an explicitly configured image', async () => {
+    const { gh, api } = await fixture('welcome:\n  image: /assets/neurobounce.gif'); api.issueHistory = [{ number: 0, pull_request: {} }];
+    await reconcilePR(gh, 1); expect(api.comments[0].body).not.toContain('修改代码后，继续推送到当前分支');
     api.pr.state = 'closed'; api.pr.merged = true; api.pr.merge_commit_sha = 'actual';
     await reconcilePR(gh, 1); await notifyPR(gh, 1); await notifyPR(gh, 1);
     const visible = api.comments.map(c => visibleComment(c.body)).join('\n');
-    expect(visible.match(/你的 PR 已合并/g)).toHaveLength(1); expect(visible).toContain('![庆祝合并](https://piper.example.test/assets/neurobounce.gif)');
+    expect(visible.match(/已集成到/g)).toHaveLength(1); expect(visible).toContain('![庆祝合并](https://piper.example.test/assets/neurobounce.gif)');
     expect(visible).toContain('已集成到 `dev`'); expect(visible).toContain('/commit/actual');
     expect(api.comments.find(c => c.body.startsWith(STATUS_MARKER)).body).not.toContain('期待下一次合作');
   });

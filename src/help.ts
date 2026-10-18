@@ -59,18 +59,19 @@ export function commandHelp(topic: string, isPR = true): string {
   const table = (complete: boolean) => ['| 命令 | 作用与权限 |', '| --- | --- |', ...Object.entries(topics).map(([key, item]) => `| ${complete ? item.syntax.map(syntax => `\`${syntax}\``).join('<br>') : `\`/${key}\``} | ${item.summary}${key === 'help' ? '' : ` 用 \`/help ${key}\` 查看用法。`} |`)];
   if (name === 'all') return ['### Piper 全部命令', '', usage, '', '替换示例参数后，每次只发送其中一条命令。', '', ...table(true), '', maintainer].join('\n');
   return [
-    '### Piper 使用帮助', '',
-    isPR ? '先看「Piper 协作状态」顶部的“接下来做什么”。CI 指自动构建和测试；集成就是将 PR 的修改合并到目标分支。' : '这里是 Issue：请按模板补充问题、复现步骤和预期结果。提交代码时创建 PR，再按 Piper 的协作状态完成检查和审查。', '',
-    '**提交代码的作者**：按审查意见修改，继续推送到同一分支。检查满足后，确认最终提交信息，在 PR 中发送 `/integrate`；作者无需写权限。', '',
-    '**审查者**：在 Files changed → Review changes 中选择 Approve 或 Request changes。普通回复不算批准；新提交需要重新批准。', '',
-    '| 我想做什么 | 在新评论中发送 |', '| --- | --- |',
-    '| 合并当前 PR | `/integrate`（检查未满足时须稍后重发） |',
-    '| 查看谁在审查 | `/reviewers` |',
-    '| 了解自动合并和取消 | `/help integrate` |',
-    '| 了解发布和部署 | `/help release` |', '',
-    usage, '',
-    ...(isPR ? [] : ['Issue 支持 `/help`、`/release prepare` 和 `/release status`；其他操作须在相应 PR 中发送。', '']),
-    '<details>', '<summary>维护者与进阶用法</summary>', '', ...table(false), '', maintainer, '', '</details>'
+    '### Piper 常用命令', '',
+    isPR ? '在 PR 对话中新建评论，单独一行输入命令。修改旧评论不会执行命令。' : '这里是 Issue。支持 `/help`、`/release prepare` 和 `/release status`；代码相关命令请在 PR 中发送。', '',
+    '| 操作 | 命令 |', '| --- | --- |',
+    ...(isPR ? [
+      '| 合并普通 PR | `/integrate` |',
+      '| 确认版本发布（维护者） | `/release publish` |',
+      '| 查看审查安排 | `/reviewers` |',
+      '| 修改提交正文 | `/summary 正文` |'
+    ] : []),
+    '| 查看发布进度 | `/release status` |',
+    '| 查看单个命令的用法 | `/help 命令名` |',
+    '| 查看全部命令与权限 | `/help all` |', '',
+    ...(isPR ? ['普通 PR 的作者或维护者可用 `/integrate` 尝试一次合并；条件未满足时不会排队。新提交需要重新审查。发布 PR 由维护者使用 `/release publish`。', '', '审查者：Files changed → Review changes → Approve 或 Request changes。普通评论不算批准。'] : [])
   ].join('\n');
 }
 

@@ -4,7 +4,7 @@ import { commitMessage } from '../src/commits';
 import { GitHub } from '../src/github';
 import { notifyPR, reconcilePR } from '../src/pulls';
 import { prepareRelease } from '../src/releases';
-import { prState, STATUS_MARKER, visibleComment } from '../src/records';
+import { prState, visibleComment } from '../src/records';
 import { READY_MARKER } from '../src/status';
 import { processJob } from '../src/worker';
 import { sha256, type Job } from '../src/types';
@@ -18,24 +18,25 @@ const command = (gh: GitHub, api: FakeGitHub, id: number, body: string) => {
 };
 
 describe('Skara integration notification lifecycle', () => {
-  it('maintains a placeholder and updates the same notice across readiness, regressions and new commits', async () => {
+  it('first notifies when ready, then updates the same notice across regressions and new commits', async () => {
     const { gh, api } = await fixture('reviewers:\n  count: 0');
     api.reviews = [];
-    await reconcilePR(gh, 1); await notifyPR(gh, 1); expect(readyRows(api)).toHaveLength(1);
-    const placeholder = readyRows(api)[0].id;
+    await reconcilePR(gh, 1); await notifyPR(gh, 1); expect(readyRows(api)).toHaveLength(0);
     api.reviews = [{ id: 1, user: { login: 'bob', type: 'User' }, state: 'APPROVED', commit_id: 'abc123', submitted_at: new Date().toISOString() }];
     await notifyPR(cold(gh, api), 1);
-    expect(readyRows(api)).toHaveLength(1); const id = readyRows(api)[0].id; expect(id).toBe(placeholder);
-    expect(readyRows(api)[0].body).toContain('此变更已通过所有自动集成前检查');
+    expect(readyRows(api)).toHaveLength(1); const id = readyRows(api)[0].id;
+    expect(readyRows(api)[0].body).toContain('已满足 CI 和审查要求');
     expect(readyRows(api)[0].body).toContain('\n/integrate\n');
     expect(readyRows(api)[0].body).not.toContain('Co-authored-by: Alice <alice@example.com>');
     expect(readyRows(api)[0].body).toContain('Reviewed-by: bob');
+    expect(readyRows(api)[0].body.indexOf('Reviewed-by: bob')).toBeLessThan(readyRows(api)[0].body.indexOf('\n/integrate\n'));
     const writes = api.writes().length; await notifyPR(cold(gh, api), 1); expect(api.writes()).toHaveLength(writes);
     api.pr.head.sha = 'newsha'; await notifyPR(cold(gh, api), 1);
-    expect(readyRows(api)[0].id).toBe(id); expect(readyRows(api)[0].body).toContain('#issuecomment-');
+    expect(readyRows(api)[0].id).toBe(id); expect(readyRows(api)[0].body).toContain(`/pull/1#piper-progress`);
     expect(readyRows(api)[0].body).not.toContain('```');
+    expect(readyRows(api)[0].body).not.toContain('@alice');
     api.reviews[0].commit_id = 'newsha'; api.runs[0].head_sha = 'newsha';
-    await notifyPR(cold(gh, api), 1); expect(readyRows(api)[0].body).toContain('此变更已通过所有自动集成前检查');
+    await notifyPR(cold(gh, api), 1); expect(readyRows(api)[0].body).toContain('已满足 CI 和审查要求');
     api.runs[0].conclusion = 'failure'; await notifyPR(cold(gh, api), 1);
     expect(readyRows(api)[0].body).not.toContain('```'); expect(readyRows(api)).toHaveLength(1);
   });
@@ -67,7 +68,7 @@ describe('Skara integration notification lifecycle', () => {
     expect(body).not.toContain('Target change 3');
     expect(body).toContain('还有 109 个提交');
     expect(body).toContain(`/compare/abc123...base123`);
-    expect(body).toContain('需要人工确认');
+    expect(body).toContain('其他人工检查');
     expect(body).toContain('通过 Squash 集成');
     expect(body).not.toContain('自动 Rebase');
   });
@@ -95,9 +96,9 @@ describe('Skara integration notification lifecycle', () => {
     await request(); expect(api.pr.merged).toBe(true);
     await notifyPR(cold(gh, api), 1); await notifyPR(cold(gh, api), 1);
     const visible = api.comments.map(c => visibleComment(c.body)).join('\n');
-    expect(visible.match(/你的 PR 已合并/g)).toHaveLength(1);
-    expect(visible.match(/!\[庆祝合并\]/g)).toHaveLength(1);
-    expect(visible).toContain('🎉'); expect(visible).toContain('https://piper.example.test/assets/neurobounce.gif');
+    expect(visible.match(/已集成到/g)).toHaveLength(1);
+    expect(visible).not.toContain('![庆祝合并]');
+    expect(visible).not.toContain('🎉');
     expect(visible).toContain('/commit/merge123'); expect(visible).not.toContain('/sponsor');
     expect((await gh.records(1)).filter(r => r.key.startsWith('command-state:')).some(r => (r.value as { change: { kind: string } }).change.kind === 'sponsor-request')).toBe(false);
   });
@@ -125,10 +126,10 @@ describe('Skara integration notification lifecycle', () => {
     api.pr.state = 'closed'; await reconcilePR(gh, 1); await notifyPR(gh, 1);
     expect(readyRows(api)[0].body).toContain('已关闭');
     api.pr.state = 'open'; await reconcilePR(gh, 1); await notifyPR(gh, 1);
-    expect(readyRows(api)[0].id).toBe(id); expect(readyRows(api)[0].body).toContain('此变更已通过所有自动集成前检查');
+    expect(readyRows(api)[0].id).toBe(id); expect(readyRows(api)[0].body).toContain('已满足 CI 和审查要求');
     expect(api.comments).toHaveLength(2);
     const views = api.comments.map(c => visibleComment(c.body)).join('\n');
-    expect(views.match(/感谢/g)).toHaveLength(1);
+    expect(views).not.toContain('感谢提交 PR');
   });
 
   it('reuses the automatic integration reply for the actual commit result', async () => {
@@ -148,7 +149,7 @@ describe('Skara integration notification lifecycle', () => {
     expect(api.comments.find(c => c.id === id).body).toContain('/commit/merge123');
     expect(api.comments.find(c => c.id === id).body).not.toContain('条件满足后');
     expect(api.comments.some(c => c.body.startsWith('<!-- piper:integrated -->'))).toBe(false);
-    expect(api.comments.find(c => c.body.startsWith(STATUS_MARKER)).body).toContain('**已合并**');
+    expect(api.pr.body).toContain('**已合并**');
     const writes = api.writes().length;
     await processJob(env, { ...job, kind: 'notice', id: 'merged-again' }, api); expect(api.writes()).toHaveLength(writes);
   });
@@ -210,7 +211,7 @@ describe('explicit manual and automatic integration', () => {
     const before = api.comments.length; await notifyPR(cold(gh, api), 1);
     expect(api.comments).toHaveLength(before);
     expect(api.comments.some(c => c.body.startsWith('<!-- piper:integrated -->'))).toBe(false);
-    expect(api.comments.filter(c => visibleComment(c.body).includes('你的 PR 已合并'))).toHaveLength(1);
+    expect(api.comments.filter(c => visibleComment(c.body).includes('已集成到'))).toHaveLength(1);
     expect(api.writes().find(c => c.route.endsWith('/merge'))?.args.merge_method).toBe('merge');
   });
 });
