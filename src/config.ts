@@ -88,6 +88,3 @@ export function matches(pattern: string, path: string): boolean {
 export function allowed(env: Env, repo: string): boolean {
   return /^[\w.-]+\/[\w.-]+$/.test(repo) && names(env.ALLOWED_REPOSITORIES).includes(repo.toLowerCase());
 }
-export function releaseAllowed(env: Env, repo: string): boolean {
-  return allowed(env, repo) && repo.toLowerCase() === 'neup-net-depart/pioneer-appointment-system';
-}

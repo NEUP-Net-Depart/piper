@@ -1,4 +1,4 @@
-import { releaseAllowed } from './config';
+import { allowed } from './config';
 import { integratedMessage } from './commits';
 import { GitHub } from './github';
 import { gate, getPR } from './pulls';
@@ -37,7 +37,7 @@ export function nextVersion(tags: string[], rule: 'patch' | 'minor' | 'date', in
   return rule === 'minor' ? `v${v[0]}.${v[1]! + 1}.0` : `v${v[0]}.${v[1]}.${v[2]! + 1}`;
 }
 function ensureRelease(gh: GitHub) {
-  if (!releaseAllowed(gh.env, gh.repo) || !gh.config!.release.enabled) throw new Denied('该仓库未启用发布；当前仅支持预约系统，请维护者检查 release.enabled 配置');
+  if (!allowed(gh.env, gh.repo) || !gh.config!.release.enabled) throw new Denied('该仓库未启用发布，请维护者检查仓库白名单和 release.enabled 配置');
 }
 function validateReleasePR(gh: GitHub, pr: PR) {
   const c = gh.config!.release;

@@ -188,10 +188,15 @@ describe('timeline based reviewer lifecycle', () => {
   });
 });
 describe('native release objects', () => {
-  it('prepares once, requires approval, waits for exact deployment and publishes once across cold starts', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true'); const date = new Date('2026-10-15T10:00:00Z');
+  it.each([repo, 'org/project'])('prepares once, requires approval, waits for exact deployment and publishes once across cold starts in %s', async repository => {
+    const { gh: configured, api } = await fixture('release:\n  enabled: true', { ALLOWED_REPOSITORIES: repository });
+    const gh = new GitHub(configured.env, repository, configured.job, api); gh.config = configured.config; gh.commandOrder = configured.commandOrder;
+    api.pr.head.repo = { full_name: repository }; api.pr.base.repo = { full_name: repository };
+    const date = new Date('2026-10-15T10:00:00Z');
     const row = (await prepareRelease(gh,date))!; await prepareRelease(fresh(gh,api),date);
+    expect(row).toMatchObject({ repo: repository, state: 'awaiting_approval' });
     expect(api.calls.filter(x => x.route === 'POST /repos/{owner}/{repo}/pulls')).toHaveLength(1);
+    await expect(publishRelease(gh,1,'mallory')).rejects.toThrow('维护者权限');
     api.reviews = []; await expect(publishRelease(gh,1,'alice')).rejects.toThrow('人工审查者');
     api.reviews = [{ id: 1, user: { login: 'bob', type: 'User' }, state: 'APPROVED', commit_id: 'abc123', submitted_at: new Date().toISOString() }];
     await publishRelease(gh,1,'alice'); expect(api.calls.find(x => x.route.endsWith('/merge'))?.args.merge_method).toBe('merge'); expect(api.tags.size).toBe(0);
@@ -202,11 +207,23 @@ describe('native release objects', () => {
     expect(api.tags.get('v0.1.0')).toBe('merge123'); expect(api.releases).toHaveLength(1); expect(api.releases[0].body).toContain('alice');
     expect(api.releases[0]).toMatchObject({ draft: false, prerelease: false, make_latest: 'true' });
     expect((await releaseFor(gh,api.pr))?.state).toBe('published');
+    const [owner, name] = repository.split('/');
+    for (const call of api.calls) expect(call.args).toMatchObject({ owner, repo: name });
   });
-  it('restricts production release to the appointment system', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true', { ALLOWED_REPOSITORIES: 'org/project' });
-    const other = new GitHub(gh.env, 'org/project', gh.job, api); other.config = gh.config;
-    await expect(prepareRelease(other,new Date(),true)).rejects.toThrow('预约系统');
+  it.each(['', 'release:\n  enabled: false'])('requires releases to be explicitly enabled with configuration %j', async config => {
+    const { gh, api } = await fixture(config);
+    await expect(prepareRelease(gh,new Date(),true)).rejects.toThrow('release.enabled');
     expect(api.writes()).toHaveLength(0);
+  });
+  it.each(['allowlist', 'release.enabled'])('blocks preparation, merge and publication after %s revocation', async policy => {
+    const { gh, api } = await fixture('release:\n  enabled: true');
+    const row = (await prepareRelease(gh,new Date(),true))!;
+    if (policy === 'allowlist') gh.env.ALLOWED_REPOSITORIES = 'org/other';
+    else gh.config!.release.enabled = false;
+    const writes = api.writes().length;
+    await expect(prepareRelease(fresh(gh,api),new Date(),true)).rejects.toThrow('仓库白名单和 release.enabled');
+    await expect(publishRelease(fresh(gh,api),1,'alice')).rejects.toThrow('仓库白名单和 release.enabled');
+    await expect(syncRelease(fresh(gh,api),row)).rejects.toThrow('仓库白名单和 release.enabled');
+    expect(api.writes()).toHaveLength(writes);
   });
 });

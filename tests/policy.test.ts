@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allowed, matches, parseConfig, releaseAllowed } from '../src/config';
+import { allowed, matches, parseConfig } from '../src/config';
 import { parseCommand, executeCommand } from '../src/commands';
 import { applyBackport } from '../src/backport';
 import { checks, commitMessage, gate, integrate, reconcilePR, tagPR } from '../src/pulls';
@@ -25,11 +25,6 @@ describe('configuration and commands', () => {
     expect(allowed(testEnv(), repo)).toBe(true);
     expect(allowed(testEnv({ ALLOWED_REPOSITORIES: 'org/project' }), 'ORG/Project')).toBe(true);
     expect(allowed(testEnv(), `${repo}-other`)).toBe(false);
-  });
-  it('requires both the appointment repository and its allowlist entry for releases', () => {
-    expect(releaseAllowed(testEnv(), repo)).toBe(true);
-    expect(releaseAllowed(testEnv({ ALLOWED_REPOSITORIES: 'org/project' }), 'org/project')).toBe(false);
-    expect(releaseAllowed(testEnv({ ALLOWED_REPOSITORIES: 'org/project' }), repo)).toBe(false);
   });
   it('only parses standalone slash commands, not fenced/quoted prose', () => {
     expect(parseCommand('> /integrate')).toBeNull(); expect(parseCommand('```\n/integrate\n```')).toBeNull();

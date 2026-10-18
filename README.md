@@ -220,7 +220,7 @@ release:
 | `merge.highRiskFiles` / `highRiskLabels` | 默认见示例；匹配后要求人工批准及显式集成请求 |
 | `labels` | 默认 `[]`，最多 50 条；按下面的规则自动设置标签和模块审查要求 |
 | `backport.enabled` / `targets` / `maxFiles` | 默认 `false` / `[]` / `50`；允许将已合并 PR 移植到列出的分支，目标最多 20 个，文件限制 1–100 |
-| `release.enabled` | 默认 `false`；启用下述发布流程，仍受代码中的仓库范围限制 |
+| `release.enabled` | 默认 `false`；为 Worker 仓库白名单内的仓库启用下述发布流程 |
 | `release.source` / `target` | 默认 `dev` / `main`，两者必须不同；目标分支即使未开启发布，也不能走普通 Squash 或 Backport |
 | `release.timezone` / `weekday` / `hour` | 默认 `Asia/Shanghai` / `4` / `18`，即北京时间周四 18 点后开始准备；星期 0–6 表示周日到周六，小时 0–23，实际执行受 Cron 和队列影响 |
 | `release.version` / `initialVersion` | 默认 `patch` / `v0.1.0`；`patch` 增加补丁号，`minor` 增加次版本并清零补丁号，`date` 使用 `v年.月.日`；初始版本只用于尚无版本的 patch / minor 发布 |
@@ -252,7 +252,7 @@ release:
 
 Backport 只用于已合并 PR。启用时配置 `backport.targets`；若希望新 Backport PR 也能由 Piper 普通集成，将目标同时加入 `merge.allowedBases`。目标不能位于 `protectedBranches`，也不能等于 `release.target`。遇到补丁冲突、符号链接或不支持的文件格式时，Piper 停止自动处理并给出人工操作提示。
 
-发布功能当前只允许仓库 `NEUP-Net-Depart/Pioneer-appointment-system`；其他仓库仅修改 `release.enabled` 不能启用发布。
+发布功能适用于 Worker 仓库白名单（`ALLOWED_REPOSITORIES`）内启用 `release.enabled: true` 的仓库。发布源分支、目标分支、检查和部署工作流均按该仓库的配置执行；实际写入还须满足前述 App 安装、启用、Dry-run 和停用开关要求。
 
 启用后，Piper 按计划创建 `source → target` 发布 PR；无新增提交时跳过。审查和 CI 满足后，维护者发送 `/release publish`，Piper 使用 Merge Commit 合并，再核对该合并 SHA 在目标分支上的 `push` 工作流和指定部署 Job。工作流及部署 Job 均成功后才创建版本 Tag 和正式 Release，并标记为最新版本。`/release prepare` 可手动准备，`/release status` 查询进度。
 
