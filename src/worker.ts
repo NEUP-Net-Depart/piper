@@ -118,8 +118,8 @@ export async function tick(env: Env, date: Date, api?: Requester) {
     if (!allowed(env,repo) || stopped(env,repo)) continue;
     try {
       const installation = await installationFor(env,repo,api);
-      const full = date.getUTCHours() === 0 && date.getUTCMinutes() < 15;
-      await env.TASKS.send({ id: 'cron:' + repo + ':' + Math.floor(date.getTime()/900000), repo, installation, kind: 'scan', time: date.toISOString(), includeClosed: true, ...(full ? {} : { closedSince: new Date(date.getTime() - 3600000).toISOString() }) });
+      const full = date.getUTCHours() === 0;
+      await env.TASKS.send({ id: 'cron:' + repo + ':' + Math.floor(date.getTime()/3600000), repo, installation, kind: 'scan', time: date.toISOString(), includeClosed: true, ...(full ? {} : { closedSince: new Date(date.getTime() - 3600000).toISOString() }) });
     } catch(e) { failures.push(e); console.error(JSON.stringify({ service: 'piper', event: 'cron-repo-failed', repo })); }
   }
   if (failures.length) throw new Error('Some repositories could not be scanned; see cron-repo-failed logs');
