@@ -15,12 +15,12 @@ const queued = (env: Awaited<ReturnType<typeof fixture>>['env']): Job[] => (env.
 const error = (status: number, message: string, data: unknown = { message }, headers = {}) => Object.assign(new Error(message), { status, response: { data, headers } });
 afterEach(() => vi.restoreAllMocks());
 
-async function request() {
+async function request(actor = 'alice') {
   const f = await fixture();
   f.api.mergeImmediately = false;
   const body = '/integrate';
-  f.api.comments.push({ id: 99, issue_number: 1, body, user: { login: 'alice', type: 'User' }, issue_url: `https://api.github.com/repos/${repo}/issues/1` });
-  const job: Job = { id: 'command:' + repo.toLowerCase() + ':99', repo, installation: 1, kind: 'command', number: 1, actor: 'alice', commentId: 99, bodyHash: await sha256(body), time: new Date().toISOString() };
+  f.api.comments.push({ id: 99, issue_number: 1, body, user: { login: actor, type: 'User' }, issue_url: `https://api.github.com/repos/${repo}/issues/1` });
+  const job: Job = { id: 'command:' + repo.toLowerCase() + ':99', repo, installation: 1, kind: 'command', number: 1, actor, commentId: 99, bodyHash: await sha256(body), time: new Date().toISOString() };
   const run = () => processJob(f.env, job, f.api);
   const next = () => processJob(f.env, queued(f.env).filter(j => j.kind === 'merge-poll').at(-1)!, f.api);
   return { ...f, job, run, next };
@@ -48,6 +48,8 @@ describe('one PR at a time in a native Stack', () => {
       headers: { 'x-github-api-version': '2026-03-10' } });
     expect(api.stacks[0].pull_requests[1].state).toBe('open');
     expect(api.calls.some(c => c.route.endsWith('/merge'))).toBe(false);
+    expect(api.calls.filter(c => c.route === readPR).every(c => c.args.headers['x-github-api-version'] === '2022-11-28')).toBe(true);
+    expect(api.calls.find(c => c.route === readStack)!.args.headers['x-github-api-version']).toBe('2026-03-10');
   });
   it('allows independent review of #74, shows dev as its final target and blocks downstack integration', async () => {
     const { gh, api } = await stackFixture(2);
@@ -147,7 +149,7 @@ describe('durable asynchronous integration', () => {
     expect(f.api.calls.find(c => c.route === poll)!.args.uuid).toBe(f.api.mergeUUID);
     expect(f.api.pr.merged).toBe(true);
   });
-  it.each(['merge-accepted:', 'merge-result:'])('recovers a lost %s receipt response without duplicate effects', async prefix => {
+  it.each(['merge-accepted:', 'merge-confirmed:'])('recovers a lost %s receipt response without duplicate effects', async prefix => {
     const f = await request(), original = f.api.request.bind(f.api);
     let lost = false;
     f.api.request = async (route, args) => {
@@ -236,11 +238,11 @@ describe('durable asynchronous integration', () => {
     expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
   });
   it('schedules a fresh task when the confirmation read times out after GitHub accepts the request', async () => {
-    const f = await request();
+    const f = await request(); await f.run();
     let reads = 0;
-    f.api.extra = async route => { if (route === readPR && ++reads === 4) throw new Error('Confirmation timed out'); };
-    // executeCommand reads once, integration twice, then confirms the accepted request.
-    expect(await f.run()).toBe('ack');
+    f.api.extra = async route => { if (route === readPR && ++reads === 2) throw new Error('Confirmation timed out'); };
+    // The poll observes the PR, then rechecks it against the completed async response.
+    expect(await f.next()).toBe('ack');
     expect(queued(f.env).some(j => j.kind === 'merge-poll' && j.failures === 1)).toBe(true);
     f.api.extra = undefined; await f.next();
     expect(f.api.pr.merged).toBe(true); expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
@@ -310,5 +312,92 @@ describe('durable asynchronous integration', () => {
     const fresh = new GitHub(f.env, repo, 'restart', f.api); fresh.config = f.gh.config;
     expect(await trackMerge(fresh, 1)).toBe(true);
     expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
+  });
+  it('uses the async result SHA without the removed PR field and restores the original congratulations in place', async () => {
+    const f = await request('carol');
+    f.api.config += 'welcome:\n  merged: "感谢你的贡献！🎉\\n期待我们下次见面！"\n  image: /assets/neurobounce.gif\n';
+    f.api.extra = async route => {
+      if (route !== readPR) return;
+      const pr = structuredClone(f.api.pr); Reflect.deleteProperty(pr, 'merge_commit_sha'); return pr;
+    };
+    await f.run();
+    const reply = f.api.comments.find(c => visibleComment(c.body).includes('GitHub 已受理'));
+    const count = f.api.comments.length;
+    await f.next();
+    expect((await prState(f.gh, f.api.pr)).merge?.result).toMatchObject({ status: 'merged', sha: 'merge123' });
+    expect(visibleComment(reply.body)).toContain('@carol\n\n@alice');
+    expect(visibleComment(reply.body)).toContain('感谢你的贡献！🎉\n期待我们下次见面！');
+    expect(visibleComment(reply.body)).toContain('![庆祝合并](https://piper.example.test/assets/neurobounce.gif)');
+    expect(visibleComment(reply.body)).not.toContain('无法确认');
+    expect(f.api.pr.body).toContain('/commit/merge123');
+    const writes = f.api.writes().length;
+    await f.next(); await f.run();
+    expect(f.api.writes()).toHaveLength(writes); expect(f.api.comments).toHaveLength(count);
+    expect(f.api.comments.filter(c => visibleComment(c.body).includes('![庆祝合并]'))).toHaveLength(1);
+    expect(f.api.calls.find(c => c.route === poll)!.args.headers['x-github-api-version']).toBe('2026-03-10');
+  });
+  it('keeps querying a pending UUID even when the PR already appears merged', async () => {
+    const f = await request(); await f.run(); f.api.merged();
+    f.api.mergeResults = [f.api.pendingMerge()];
+    await f.next();
+    expect((await prState(f.gh, f.api.pr)).merge?.result).toBeUndefined();
+    expect(f.api.comments.some(c => c.body.includes('已集成到'))).toBe(false);
+    await f.next();
+    expect((await prState(f.gh, f.api.pr)).merge?.result?.status).toBe('merged');
+    expect(f.api.calls.filter(c => c.route === poll)).toHaveLength(2);
+  });
+  it('preserves successful receipts written before confirmation records were introduced', async () => {
+    const f = await request(); await f.run(); f.api.merged();
+    await f.gh.record(1, 'merge-result:' + f.job.id, { status: 'merged', sha: 'merge123', message: '已核实合并结果。' });
+    await processJob(f.env, { ...f.job, id: 'old-success', kind: 'reconcile' }, f.api);
+    expect(f.api.comments.map(c => visibleComment(c.body)).join('\n')).toContain('已集成到');
+    expect(f.api.calls.filter(c => c.route === poll)).toHaveLength(0);
+    expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
+  });
+  it.each([false, true])('repairs a persisted unknown result through reconciliation (expired=%s)', async expired => {
+    const f = await request(); await f.run(); f.api.merged();
+    const previous = { status: 'unknown', message: 'PR 已合并，但最终 HEAD、目标分支或提交无法与本次请求对应。' };
+    await f.gh.record(1, 'merge-result:' + f.job.id, previous);
+    await f.gh.replyFor(1, f.job.id, '结果暂时无法确认：' + previous.message, 'alice');
+    const count = f.api.comments.length;
+    if (expired) vi.spyOn(Date, 'now').mockReturnValue(Date.now() + MERGE_RETENTION_MS + 1);
+    const job: Job = { ...f.job, id: 'recovery', kind: 'reconcile' };
+    expect(await processJob(f.env, job, f.api)).toBe('ack');
+    expect(await f.gh.getRecord(1, 'merge-result:' + f.job.id)).toEqual(previous);
+    expect((await prState(f.gh, f.api.pr)).merge?.result).toMatchObject({ status: 'merged', sha: 'merge123' });
+    const visible = f.api.comments.map(c => visibleComment(c.body)).join('\n');
+    expect(visible).not.toContain('无法确认'); expect(visible).toContain('感谢贡献。');
+    expect(f.api.pr.body).toContain('/commit/merge123');
+    const writes = f.api.writes().length;
+    await processJob(f.env, job, f.api); await f.next();
+    expect(f.api.writes()).toHaveLength(writes); expect(f.api.comments).toHaveLength(count);
+    expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
+    expect(f.api.calls.filter(c => c.route === poll)).toHaveLength(expired ? 0 : 1);
+  });
+  it.each(['head', 'target', 'commit'])('does not celebrate a conflicting final %s or overwrite a refusal with a success notice', async conflict => {
+    const f = await request(); await f.run(); f.api.merged();
+    if (conflict === 'head') f.api.pr.head.sha = 'changed';
+    if (conflict === 'target') f.api.pr.base.ref = 'main';
+    f.api.extra = async route => route === poll ? { status: 'merged', details: { message: 'Merged', sha: conflict === 'commit' ? 'different' : 'merge123' } } : undefined;
+    await f.next(); await processJob(f.env, { ...f.job, id: 'recheck', kind: 'reconcile' }, f.api);
+    expect((await prState(f.gh, f.api.pr)).merge?.result?.status).toBe('unknown');
+    expect(f.api.comments.map(c => visibleComment(c.body)).join('\n')).not.toContain('已集成到');
+    expect(await f.gh.getRecord(1, 'merge-confirmed:' + f.job.id)).toBeUndefined();
+    expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
+  });
+  it('confirms the actual PR when the accepted UUID has expired early', async () => {
+    const f = await request(); await f.run(); f.api.merged();
+    f.api.extra = async route => { if (route === poll) throw error(404, 'Expired UUID'); };
+    await f.next();
+    expect((await prState(f.gh, f.api.pr)).merge?.result).toMatchObject({ status: 'merged', sha: 'merge123' });
+    expect(f.api.calls.filter(c => c.route === submit)).toHaveLength(1);
+  });
+  it('does not guess a commit when both the expired result and the PR lack it', async () => {
+    const f = await request(); await f.run(); f.api.merged(); f.api.pr.merge_commit_sha = null;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + MERGE_RETENTION_MS + 1);
+    await f.next();
+    expect((await prState(f.gh, f.api.pr)).merge?.result?.status).toBe('unknown');
+    expect(f.api.calls.filter(c => c.route === poll)).toHaveLength(0);
+    expect(f.api.comments.map(c => visibleComment(c.body)).join('\n')).not.toContain('已集成到');
   });
 });

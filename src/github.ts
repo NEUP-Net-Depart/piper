@@ -6,6 +6,9 @@ import { commentBody, decodeRecords, encodeRecord, recordMarkers, STATUS_MARKER,
 import { addressUser } from './mentions';
 
 export type Requester = { request: (route: string, parameters?: any) => Promise<{ data: any; status?: number }> };
+// Existing PR, Tag and release consumers use the 2022 contract (merge_commit_sha).
+// Upgrade only the Stack and asynchronous merge endpoints to the new contract.
+const apiVersion = (route: string) => route.includes('/merge-async') || route.endsWith('/stacks') ? '2026-03-10' : '2022-11-28';
 export class GitHub {
   readonly owner: string;
   readonly name: string;
@@ -26,7 +29,7 @@ export class GitHub {
   async read<T = any>(route: string, args: Record<string, unknown> = {}): Promise<T> {
     this.requests.reads++;
     const scope = route.includes('{owner}') && route.includes('{repo}') ? { owner: this.owner, repo: this.name } : {};
-    return (await this.api.request(route, { ...scope, ...args, headers: { 'x-github-api-version': '2026-03-10' }, request: { timeout: 20000 } })).data as T;
+    return (await this.api.request(route, { ...scope, ...args, headers: { 'x-github-api-version': apiVersion(route) }, request: { timeout: 20000 } })).data as T;
   }
   useReadCache() { this.cacheEnabled = true; }
   clearReadCache() { this.lists.clear(); }
@@ -100,7 +103,7 @@ export class GitHub {
       const recovered = await reconcile();
       await this.guard();
       if (recovered === undefined) this.requests.writes++;
-      const response = recovered === undefined ? await this.api.request(route, { owner: this.owner, repo: this.name, ...args, headers: { 'x-github-api-version': '2026-03-10' }, request: { timeout: 20000 } }) : undefined;
+      const response = recovered === undefined ? await this.api.request(route, { owner: this.owner, repo: this.name, ...args, headers: { 'x-github-api-version': apiVersion(route) }, request: { timeout: 20000 } }) : undefined;
       const result = recovered ?? (decode && response ? decode(response.data, response.status) : response!.data) as T;
       if (route === 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments' || route === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}') {
         const number = Number(args.issue_number);

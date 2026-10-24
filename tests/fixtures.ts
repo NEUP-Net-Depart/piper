@@ -36,6 +36,12 @@ export class FakeGitHub implements Requester {
   stacks: any[] = [];
   readonly mergeUUID = '630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42';
   merged() { this.pr.merged = true; this.pr.state = 'closed'; this.pr.merged_at = new Date().toISOString(); this.pr.merge_commit_sha = 'merge123'; }
+  private pullResponse(pr: PR, args: any) {
+    const data = structuredClone(pr);
+    // The 2026 REST contract removes this field, including from merged PRs.
+    if (args.headers?.['x-github-api-version'] === '2026-03-10') Reflect.deleteProperty(data, 'merge_commit_sha');
+    return data;
+  }
   async request(route: string, args: any = {}): Promise<{ data: any; status?: number }> {
     this.calls.push({ route, args });
     if (this.extra) { const value = await this.extra(route, args); if (value !== undefined) return { data: value, status: route.endsWith('/merge-async') && value.status === 'pending' ? 202 : 200 }; }
@@ -44,10 +50,13 @@ export class FakeGitHub implements Requester {
     if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}') return { data: { number: this.pr.number, user: this.pr.user, pull_request: {} } };
     if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}/timeline') return { data: this.timeline };
     if (route.includes('/collaborators/{username}/permission')) return { data: { permission: this.permissions[args.username] ?? 'none' } };
-    if (route === 'GET /repos/{owner}/{repo}/contents/{path}') return { data: { type: 'file', encoding: 'base64', content: btoa(this.config), size: this.config.length, sha: 'config123' } };
-    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: structuredClone(this.pr) };
+    if (route === 'GET /repos/{owner}/{repo}/contents/{path}') {
+      const bytes = new TextEncoder().encode(this.config);
+      return { data: { type: 'file', encoding: 'base64', content: btoa(Array.from(bytes, b => String.fromCharCode(b)).join('')), size: bytes.length, sha: 'config123' } };
+    }
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: this.pullResponse(this.pr, args) };
     if (route === 'GET /repos/{owner}/{repo}/stacks') return { data: structuredClone(this.stacks) };
-    if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') { this.pr.body = args.body; return { data: structuredClone(this.pr) }; }
+    if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') { this.pr.body = args.body; return { data: this.pullResponse(this.pr, args) }; }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files') return { data: this.files };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews') return { data: this.reviews };
     if (route.endsWith('/check-runs')) return { data: { check_runs: this.runs } };
@@ -76,7 +85,7 @@ export class FakeGitHub implements Requester {
     if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge') { this.merged(); return { data: { merged: true, sha: 'merge123' } }; }
     if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async') {
       this.mergeOptions = args;
-      if (this.mergeImmediately) this.merged();
+      if (this.mergeImmediately) { this.merged(); return { status: 200, data: { status: 'merged', details: { message: 'Pull request was merged.', sha: 'merge123' } } }; }
       return { status: 202, data: this.pendingMerge() };
     }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}') {
@@ -95,9 +104,9 @@ export class FakeGitHub implements Requester {
     if (route === 'GET /repos/{owner}/{repo}/compare/{basehead}') return { data: { status: 'ahead', ahead_by: 1, commits: [{ sha: 'abc123', author: { login: 'alice' }, commit: { author: { name: 'Alice' }, message: 'fix booking' } }] } };
     if (route === 'GET /repos/{owner}/{repo}/pulls') {
       const prs = [...new Map([this.pr, ...this.prs].map(p => [p.number,p])).values()];
-      return { data: prs.filter(p => (!args.state || args.state === 'all' || p.state === args.state) && (!args.head || p.head.ref === args.head.split(':').slice(1).join(':')) && (!args.base || p.base.ref === args.base)).map(p => ({ ...p, updated_at: new Date().toISOString() })) };
+      return { data: prs.filter(p => (!args.state || args.state === 'all' || p.state === args.state) && (!args.head || p.head.ref === args.head.split(':').slice(1).join(':')) && (!args.base || p.base.ref === args.base)).map(p => ({ ...this.pullResponse(p, args), updated_at: new Date().toISOString() })) };
     }
-    if (route === 'POST /repos/{owner}/{repo}/pulls') { const created = { ...this.pr, number: 1, title: args.title, body: args.body, user: { login: 'piper[bot]', type: 'Bot' }, head: { ...this.pr.head, ref: args.head }, base: { ...this.pr.base, ref: args.base } }; this.pr = created; this.prs.push(created); return { data: created }; }
+    if (route === 'POST /repos/{owner}/{repo}/pulls') { const created = { ...this.pr, number: 1, title: args.title, body: args.body, user: { login: 'piper[bot]', type: 'Bot' }, head: { ...this.pr.head, ref: args.head }, base: { ...this.pr.base, ref: args.base } }; this.pr = created; this.prs.push(created); return { data: this.pullResponse(created, args) }; }
     if (route === 'GET /repos/{owner}/{repo}/git/commits/{commit_sha}') return { data: { parents: [{ sha: 'base123' }, { sha: 'abc123' }] } };
     if (route.includes('/actions/workflows/')) return { data: { workflow_runs: this.workflows } };
     if (route.includes('/attempts/') && route.endsWith('/jobs')) return { data: { jobs: this.workflowJobs } };

@@ -65,7 +65,8 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   if (result?.stack?.detail) lines.push(plain(result.stack.detail), '');
   if (pr.merged) {
     lines.push('**已合并**', '');
-    if (pr.merge_commit_sha) lines.push(`合并提交：[${pr.merge_commit_sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${pr.merge_commit_sha})`, '');
+    const sha = state.merge?.result?.status === 'merged' ? state.merge.result.sha : pr.merge_commit_sha;
+    if (sha) lines.push(`合并提交：[${sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${sha})`, '');
     if (release) lines.push('部署与版本发布状态请在新评论中发送 `/release status` 查询。');
   } else if (pr.state !== 'open') {
     lines.push('**已关闭，未合并**', '', '重新打开 PR 后会检查最新提交的 CI 和审查结果。');
@@ -148,8 +149,9 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   if (!result?.ready || pr.state !== 'open' || state.merge && !pr.merged) {
     const pending = [state.merge ? mergeFeedback(state.merge) : '当前尚未满足合并条件，请查看协作进度。', '', `[查看待处理事项与检查进度](${link})。`, '', ...(state.merge ? [] : integrationSteps(gh, pr, state, false, false, result?.autoRequestValid))].join('\n').trimEnd();
     if (existing && !(pr.merged && state.merge && !state.merge.intent.replyJob)) await gh.managedComment(pr.number, READY_MARKER, pr.merged ? `此 PR 已合并。[查看结果](${link})。` : pr.state !== 'open' ? `此 PR 已关闭，未合并。[查看状态](${link})。` : pending);
-    if (pr.merged && pr.merge_commit_sha) {
-      const message = integratedMessage(gh, pr);
+    const sha = state.merge?.result?.status === 'merged' ? state.merge.result.sha : !state.merge ? pr.merge_commit_sha : null;
+    if (pr.merged && sha) {
+      const message = integratedMessage(gh, pr, sha);
       const job = state.release_job ?? (state.merge ? state.merge.intent.replyJob : state.integrate_job);
       if (job) await gh.replyFor(pr.number, job, message, state.release_job ? state.release_actor : state.merge?.intent.actor ?? state.integrate_actor ?? undefined);
       else await gh.managedComment(pr.number, state.merge ? READY_MARKER : INTEGRATED_MARKER, message);

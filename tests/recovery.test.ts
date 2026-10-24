@@ -118,6 +118,17 @@ async function preparedRelease() {
   return { ...f, row };
 }
 describe('release recovery from PR, deployment, tag and release objects', () => {
+  it('keeps release PR reads and Merge Commit on their supported API contract through publication', async () => {
+    const { gh, api, row } = await preparedRelease();
+    await syncRelease(cold(gh, api), row);
+    expect((await releaseFor(gh, await getPR(gh, 1)))?.state).toBe('published');
+    expect(api.tags.get('v0.1.0')).toBe('merge123');
+    expect(api.releases).toHaveLength(1);
+    const merge = api.calls.find(c => c.route.endsWith('/merge'))!;
+    expect(merge.args).toMatchObject({ merge_method: 'merge', headers: { 'x-github-api-version': '2022-11-28' } });
+    expect(api.calls.some(c => c.route.includes('/merge-async'))).toBe(false);
+    expect(api.calls.filter(c => c.route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}').every(c => c.args.headers['x-github-api-version'] === '2022-11-28')).toBe(true);
+  });
   it('finishes labeling when PR creation succeeded but its response was lost', async () => {
     const { gh, api } = await fixture('release:\n  enabled: true');
     loseResponse(api,'POST /repos/{owner}/{repo}/pulls'); const date = new Date('2026-10-15T10:00:00Z');

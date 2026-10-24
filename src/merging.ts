@@ -14,8 +14,9 @@ export const mergeIntentSchema = z.object({
 });
 export type MergeIntent = z.infer<typeof mergeIntentSchema>;
 const acceptedSchema = z.object({ uuid: z.uuid() });
+const mergedSchema = z.object({ status: z.literal('merged'), message: z.string(), sha: z.string().min(1) });
 const resultSchema = z.discriminatedUnion('status', [
-  z.object({ status: z.literal('merged'), message: z.string(), sha: z.string().min(1) }),
+  mergedSchema,
   z.object({ status: z.enum(['failed', 'unknown', 'enqueued']), message: z.string() })
 ]);
 export interface MergeState {
@@ -43,7 +44,8 @@ export function mergeState(records: NativeRecord[]): MergeState | undefined {
   if (last.key !== 'merge-intent:' + intent.key) throw new Denied('Invalid merge intent record');
   const accepted = records.find(r => r.key === 'merge-accepted:' + intent.key);
   const result = records.find(r => r.key === 'merge-result:' + intent.key);
-  return { intent, accepted: accepted && acceptedSchema.parse(accepted.value), result: result && resultSchema.parse(result.value) };
+  const confirmed = records.find(r => r.key === 'merge-confirmed:' + intent.key);
+  return { intent, accepted: accepted && acceptedSchema.parse(accepted.value), result: confirmed ? mergedSchema.parse(confirmed.value) : result && resultSchema.parse(result.value) };
 }
 export function mergeFeedback(state: MergeState) {
   if (state.result?.status === 'failed') return `合并失败：${safeText(state.result.message)}\n\n修复原因后，请在新评论中重新发送 /integrate。`;
@@ -60,7 +62,8 @@ async function feedback(gh: GitHub, number: number, state: MergeState, pr?: PR) 
   else await gh.managedComment(number, '<!-- piper:ready -->', message);
 }
 async function finish(gh: GitHub, number: number, state: MergeState, result: NonNullable<MergeState['result']>, pr?: PR) {
-  state.result = await gh.record(number, 'merge-result:' + state.intent.key, result) ?? result;
+  // A verified success can supersede an earlier inconclusive result without rewriting receipts.
+  state.result = await gh.record(number, (result.status === 'merged' ? 'merge-confirmed:' : 'merge-result:') + state.intent.key, result) ?? result;
   gh.mergePolls.delete(number);
   await feedback(gh, number, state, pr);
   return state.result.status === 'merged';
@@ -72,13 +75,14 @@ function matches(response: Extract<AsyncMergeResponse, { status: 'pending' }>, s
     (d.bypass_rules === false || !conflict && d.bypass_rules === undefined) &&
     (d.commit_title === undefined || d.commit_title === o.commit_title) && (d.commit_message === undefined || d.commit_message === o.commit_message);
 }
-async function observedMerge(gh: GitHub, number: number, state: MergeState, pr: PR) {
+async function observedMerge(gh: GitHub, number: number, state: MergeState, pr: PR, sha = pr.merge_commit_sha) {
   if (!pr.merged) return;
-  if (pr.head.sha !== state.intent.options.sha || pr.base.ref !== state.intent.target || !pr.merge_commit_sha) {
+  if (pr.head.sha !== state.intent.options.sha || pr.base.ref !== state.intent.target || sha && pr.merge_commit_sha && sha !== pr.merge_commit_sha) {
     await finish(gh, number, state, { status: 'unknown', message: 'PR 已合并，但最终 HEAD、目标分支或提交无法与本次请求对应。' });
     return 'unknown' as const;
   }
-  await finish(gh, number, state, { status: 'merged', sha: pr.merge_commit_sha, message: '已核实合并结果。' }, pr);
+  if (!sha) return; // Missing evidence is not a conflicting HEAD or target.
+  await finish(gh, number, state, { status: 'merged', sha, message: '已核实合并结果。' }, pr);
   return 'merged' as const;
 }
 async function acceptResponse(gh: GitHub, number: number, state: MergeState, raw: unknown, conflict = false, failures = 0) {
@@ -88,12 +92,7 @@ async function acceptResponse(gh: GitHub, number: number, state: MergeState, raw
   if (response.status === 'pending') {
     if (!matches(response, state, conflict)) return finish(gh, number, state, { status: 'unknown', message: '已有异步请求的 UUID、HEAD 或合并选项与本次请求不一致。' });
     state.accepted = await gh.record(number, 'merge-accepted:' + state.intent.key, { uuid: response.details.uuid }) ?? { uuid: response.details.uuid };
-    let pr: PR;
-    try { pr = await getPR(gh, number); }
-    catch (e) { return pollFailure(gh, number, state, e, failures); }
-    const observed = await observedMerge(gh, number, state, pr);
-    if (observed) return observed === 'merged';
-    gh.mergePolls.set(number, 0);
+    if (!state.result) gh.mergePolls.set(number, 0);
     await feedback(gh, number, state);
     return false;
   }
@@ -102,11 +101,9 @@ async function acceptResponse(gh: GitHub, number: number, state: MergeState, raw
   let pr: PR;
   try { pr = await getPR(gh, number); }
   catch (e) { return pollFailure(gh, number, state, e, failures); }
-  if (pr.merged && pr.merge_commit_sha === response.details.sha) {
-    await observedMerge(gh, number, state, pr);
-    return state.result?.status === 'merged';
-  }
-  gh.mergePolls.set(number, 0);
+  const observed = await observedMerge(gh, number, state, pr, response.details.sha);
+  if (observed) return observed === 'merged';
+  if (!state.result) gh.mergePolls.set(number, 0);
   await feedback(gh, number, state);
   return false;
 }
@@ -157,6 +154,7 @@ export async function submitMerge(gh: GitHub, number: number, intent: MergeInten
 
 async function pollFailure(gh: GitHub, number: number, state: MergeState, e: unknown, failures: number) {
   gh.audit('merge-poll', 'unconfirmed', { message: e instanceof Error ? e.message : 'Network failure' });
+  if (state.result) { await feedback(gh, number, state); return false; }
   if (permanent(e) || failures >= 4) return finish(gh, number, state, { status: 'unknown', message: `查询合并结果失败：${errorMessage(e)}` });
   gh.mergePolls.set(number, failures + 1);
   await feedback(gh, number, state);
@@ -165,24 +163,30 @@ async function pollFailure(gh: GitHub, number: number, state: MergeState, e: unk
 export async function trackMerge(gh: GitHub, number: number, failures = 0): Promise<boolean> {
   const state = mergeState(await gh.records(number));
   if (!state) return false;
-  if (state.result) {
+  if (state.result && state.result.status !== 'unknown') {
     if (state.result.status !== 'merged') await feedback(gh, number, state);
     return false;
   }
   let pr: PR;
   try { pr = await getPR(gh, number); }
   catch (e) { return pollFailure(gh, number, state, e, failures); }
+  // Terminal uncertainty may be corrected by a later verified outcome, never by resubmission.
+  if (state.result && (!state.accepted || !pr.merged)) { await feedback(gh, number, state); return false; }
+  if (state.accepted && Date.now() - state.intent.at < MERGE_RETENTION_MS) {
+    let response: unknown;
+    try { response = await gh.read<unknown>('GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}', { pull_number: number, uuid: state.accepted.uuid }); }
+    catch (e) {
+      const observed = await observedMerge(gh, number, state, pr);
+      if (observed) return observed === 'merged';
+      return pollFailure(gh, number, state, e, failures);
+    }
+    return acceptResponse(gh, number, state, response, false, failures);
+  }
   const observed = await observedMerge(gh, number, state, pr);
   if (observed) return observed === 'merged';
   if (Date.now() - state.intent.at >= MERGE_RETENTION_MS) return finish(gh, number, state, { status: 'unknown', message: '请求已超过 24 小时保留期，PR 尚未确认合并。' });
-  if (!state.accepted) {
-    if (pr.state !== 'open') return finish(gh, number, state, { status: 'failed', message: 'PR 已关闭且未合并。' });
-    gh.mergePolls.set(number, 0);
-    await feedback(gh, number, state);
-    return false;
-  }
-  let response: unknown;
-  try { response = await gh.read<unknown>('GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}', { pull_number: number, uuid: state.accepted.uuid }); }
-  catch (e) { return pollFailure(gh, number, state, e, failures); }
-  return acceptResponse(gh, number, state, response, false, failures);
+  if (pr.state !== 'open' && !pr.merged) return finish(gh, number, state, { status: 'failed', message: 'PR 已关闭且未合并。' });
+  gh.mergePolls.set(number, 0);
+  await feedback(gh, number, state);
+  return false;
 }
