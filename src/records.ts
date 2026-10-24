@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { GitHub } from './github';
 import { Denied, type PRState, type PR } from './types';
+import { mergeState } from './merging';
 
 const identity = z.object({ name: z.string().min(1).max(100).regex(/^[^<>\r\n]+$/), email: z.string().regex(/^[^\s<>@]+@[^\s<>@]+$/) }).strict();
 const commandFields = { order: z.number().int().positive(), actor: z.string().min(1), head: z.string().min(1) };
@@ -55,6 +56,7 @@ export function decodeRecords(comment: any, bot: string, repo: string, number: n
 export async function prState(gh: GitHub, pr: PR): Promise<PRState> {
   const state: PRState = { metadata: {}, integrate_head: null, integrate_actor: null, integration: 'none', integrate_mode: null, integrate_job: null, welcomes: [] };
   const records = await gh.records(pr.number);
+  state.merge = mergeState(records);
   const approval = records.find(r => r.key === 'release-approval:' + pr.head.sha)?.value as { job?: unknown; actor?: unknown } | undefined;
   if (typeof approval?.job === 'string') state.release_job = approval.job;
   if (typeof approval?.actor === 'string') state.release_actor = approval.actor;
@@ -81,5 +83,6 @@ export async function prState(gh: GitHub, pr: PR): Promise<PRState> {
         state.integration = c.cancelled ? 'cancelled' : !state.integrate_head ? 'outdated' : state.integrate_mode === 'auto' ? 'requested' : 'none'; break;
     }
   }
+  if (state.merge?.result?.status === 'failed' && (state.merge.intent.options.sha !== pr.head.sha || state.integrate_job && state.integrate_job !== state.merge.intent.key)) state.merge = undefined;
   return state;
 }

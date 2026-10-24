@@ -10,7 +10,7 @@ const topics: Record<string, { summary: string; syntax: string[]; detail: string
   integrate: {
     summary: '将当前 PR 合并到目标分支。作者或维护者可执行。',
     syntax: ['/integrate', '/integrate auto', '/integrate cancel', '/integrate manual'],
-    detail: '普通 PR 使用 Squash：把这次 PR 的修改合成一个提交。\n\n- /integrate：立即尝试一次。作者无需仓库写权限；条件未满足时不会排队，完成检查后须重新发送。\n- /integrate auto：等待当前提交的条件满足后自动合并，发令者必须有仓库写权限。\n- /integrate cancel：取消通过命令登记的自动请求；/integrate manual 是同义命令，不会立即合并。\n\n先确认协作状态中的 CI（自动检查）、人工批准和分支规则已满足，再检查集成提示中的最终提交信息。推送新提交会使旧请求和旧批准失效。取消命令请求不会关闭维护者在 .piper.yml 中配置的 merge.auto。发布 PR 使用 /release publish。'
+    detail: '普通 PR 使用 Squash：把这次 PR 的修改合成一个提交。\n\n- /integrate：立即尝试一次。作者无需仓库写权限；条件未满足时不会排队，完成检查后须重新发送。\n- /integrate auto：等待当前提交的条件满足后自动合并，发令者必须有仓库写权限。\n- /integrate cancel：取消通过命令登记的自动请求；/integrate manual 是同义命令，不会立即合并。\n\n先确认协作状态中的 CI（自动检查）、人工批准和分支规则已满足，再检查集成提示中的最终提交信息。推送新提交会使旧请求和旧批准失效。取消命令请求不会关闭维护者在 .piper.yml 中配置的 merge.auto，也不会撤回 GitHub 已受理的请求。GitHub 受理后会异步更新本条命令回复，无需重复发送。Stack 只逐个集成：先合并下层 PR，等待 GitHub 更新上层分支后重新检查和审查。发布 PR 使用 /release publish。'
   },
   reviewers: {
     summary: '查看审查安排；维护者可邀请或更换审查者。',

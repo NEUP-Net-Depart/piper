@@ -1,4 +1,6 @@
 import { matches } from './config';
+import { stackFor } from './stacks';
+import { mergeFeedback, submitMerge, trackMerge } from './merging';
 import { commitMessage, integratedMessage } from './commits';
 import { GitHub } from './github';
 import { reviewPolicy, syncLabels } from './labels';
@@ -69,11 +71,26 @@ export async function gate(gh: GitHub, pr: PR, release = false, changedFiles?: A
   progress.push({ name: '合并冲突', ready: pr.mergeable === true, detail: pr.mergeable === null ? 'GitHub 正在检查' : pr.mergeable ? '没有冲突' : '存在冲突', owner: pr.mergeable === null ? '等待' : '作者', action: pr.mergeable === null ? '等待 GitHub 完成冲突检查。' : !pr.mergeable ? '将目标分支的最新代码合入当前分支，解决冲突后推送到同一 PR。' : undefined });
   if (!['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state)) reasons.push(`GitHub 合并状态：${pr.mergeable_state}`);
   progress.push({ name: 'GitHub 分支规则', ready: ['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state), detail: ['clean', 'unstable', 'has_hooks'].includes(pr.mergeable_state) ? 'GitHub 允许继续核验 CI 和审查' : `等待满足 GitHub 要求（${pr.mergeable_state}）`, owner: '维护者', action: pr.mergeable === null ? undefined : '查看 PR 页面底部的合并区域，按提示补齐分支保护要求。' });
+  let stack: Awaited<ReturnType<typeof stackFor>> | undefined;
+  if (!release) {
+    try {
+      stack = await stackFor(gh, pr);
+      if (stack.detail) {
+        if (stack.waiting.length) reasons.push(`请先合并下层 PR：${stack.waiting.map(n => '#' + n).join('、')}。`);
+        progress.push({ name: 'Stack 依赖', ready: !stack.waiting.length, detail: stack.detail + (stack.waiting.length ? `；等待下层 ${stack.waiting.map(n => '#' + n).join('、')}` : '；可独立集成'), owner: '等待' });
+      }
+    } catch (e) {
+      if (!(e instanceof Denied)) throw e;
+      reasons.push(e.message);
+      progress.push({ name: 'Stack 依赖', ready: false, detail: e.message, owner: '等待' });
+    }
+  }
+  const target = stack?.target ?? pr.stack?.base?.ref ?? pr.base.ref;
   const targetStart = reasons.length;
   if (release && (pr.base.ref !== cfg.release.target || pr.head.ref !== cfg.release.source || pr.head.repo?.full_name.toLowerCase() !== gh.repo.toLowerCase() || pr.user.login !== gh.env.BOT_LOGIN || pr.user.type !== 'Bot' || !/^<!-- piper-release:v1:\d{4}-\d{2}-\d{2}:v\d+\.\d+\.\d+:[a-zA-Z0-9]+ -->/.test(pr.body ?? ''))) reasons.push('请使用 Piper 创建的发布 PR');
-  if (!release && (!cfg.merge.allowedBases.includes(pr.base.ref) || cfg.merge.protectedBranches.includes(pr.base.ref))) reasons.push(`目标分支 ${pr.base.ref} 不允许普通集成。普通贡献可使用：${cfg.merge.allowedBases.filter(b => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '暂无可用分支'}。`);
-  if (!release && pr.base.ref === cfg.release.target) reasons.push('发布目标分支必须使用发布流程');
-  progress.push({ name: '目标分支', ready: reasons.length === targetStart, detail: pr.base.ref, owner: '维护者', action: release ? '使用 /release prepare 创建发布 PR，再到该 PR 完成检查并发布。' : `确认 PR 的目标分支；普通贡献使用 ${cfg.merge.allowedBases.filter(b => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '仓库配置允许的分支'}。` });
+  if (!release && (!cfg.merge.allowedBases.includes(target) || cfg.merge.protectedBranches.includes(target))) reasons.push(`目标分支 ${target} 不允许普通集成。普通贡献可使用：${cfg.merge.allowedBases.filter(b => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '暂无可用分支'}。`);
+  if (!release && target === cfg.release.target) reasons.push('发布目标分支必须使用发布流程');
+  progress.push({ name: '目标分支', ready: reasons.length === targetStart, detail: target, owner: '维护者', action: release ? '使用 /release prepare 创建发布 PR，再到该 PR 完成检查并发布。' : `确认 PR 的目标分支；普通贡献使用 ${cfg.merge.allowedBases.filter(b => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '仓库配置允许的分支'}。` });
   const files = changedFiles ?? await filesFor(gh, pr.number);
   // GitHub caps PR files at 3,000. Never treat a capped response as complete.
   if (files.length >= 3000) {
@@ -134,13 +151,13 @@ export async function gate(gh: GitHub, pr: PR, release = false, changedFiles?: A
   if (policy.rules.length) progress.push({ name: '模块审查要求', ready: approved.length >= minimum, detail: `${policy.rules.map(r => r.name).join('、')}；至少 ${minimum} 位批准者` });
   const labelRules = policy.rules.map(rule => ({ name: rule.name, minimum: Math.max(cfg.merge.minApprovals, rule.minApprovals ?? 0), reviewers: rule.reviewers.length ? rule.reviewers : cfg.reviewers.pool,
     reason: [rule.titlePrefixes.some(p => pr.title.toLowerCase().startsWith(p.toLowerCase())) ? '标题前缀匹配' : '', rule.branches.some(p => matches(p, pr.head.ref)) ? `源分支 ${pr.head.ref}` : '', ...files.filter(f => rule.files.some(p => matches(p, f.filename) || (f.previous_filename && matches(p, f.previous_filename)))).slice(0, 3).map(f => `文件 ${f.filename}${f.previous_filename ? `（原路径 ${f.previous_filename}）` : ''}`)].filter(Boolean).join('；') }));
-  return { ready: !reasons.length, reasons, reviewers: approved.sort(), outdatedReviewers: outdated.sort(), autoRequestValid, highRisk, progress, labelRules, reviewDetails: [...latest.values()].map(r => ({ login: r.user.login, sha: r.commit_id, state: r.state })) };
+  return { stack, ready: !reasons.length, reasons, reviewers: approved.sort(), outdatedReviewers: outdated.sort(), autoRequestValid, highRisk, progress, labelRules, reviewDetails: [...latest.values()].map(r => ({ login: r.user.login, sha: r.commit_id, state: r.state })) };
 }
 export async function integrate(gh: GitHub, number: number, actor: string, expected: string, automatic = false, policyAuto = false) {
   return gh.fresh(() => integrateCurrent(gh, number, actor, expected, automatic, policyAuto));
 }
 async function integrateCurrent(gh: GitHub, number: number, actor: string, expected: string, automatic: boolean, policyAuto: boolean) {
-  let pr = await getPR(gh, number);
+  const pr = await getPR(gh, number);
   if (pr.merged) {
     const previous = await prState(gh, pr), metadata = previous.metadata;
     if (metadata.tag) await tagPR(gh, pr, metadata.tag);
@@ -148,11 +165,17 @@ async function integrateCurrent(gh: GitHub, number: number, actor: string, expec
     return true;
   }
   if (pr.head.sha !== expected) throw new Denied('PR 已更新，旧的集成请求已失效。请完成新提交的检查与审查，再发送 /integrate。');
-  const target = pr.base.ref;
   const maintainer = await gh.maintainer(actor);
   if (actor.toLowerCase() !== pr.user.login.toLowerCase() && !maintainer) throw new Denied('集成需要 PR 作者或仓库维护者执行。维护者须具有 write、maintain 或 admin 权限。');
   const state = await prState(gh, pr);
   if ((automatic || state.integrate_mode === 'auto') && !maintainer) throw new Denied('自动集成需要当前仍有仓库 write、maintain 或 admin 权限。');
+  if (state.merge && (!state.merge.result || ['unknown', 'enqueued'].includes(state.merge.result.status))) {
+    await trackMerge(gh, number);
+    gh.commandResult ??= mergeFeedback(state.merge);
+    return false;
+  }
+  const key = policyAuto ? `policy:${pr.head.sha}` : state.integrate_job ?? gh.job;
+  if (state.merge?.intent.key === key) { gh.commandResult = mergeFeedback(state.merge); return false; }
   const result = await gate(gh, pr);
   if (policyAuto && result.highRisk) return false;
   if (!result.ready) {
@@ -163,21 +186,20 @@ async function integrateCurrent(gh: GitHub, number: number, actor: string, expec
   if (commits.length >= 250) throw new Denied('提交数量达到 GitHub 的 250 条读取上限，无法确认完整署名。请维护者拆分 PR 或人工核对完整提交清单后处理合并。');
   const authors = commits.filter(c => c.commit.author).map(c => ({ ...c.commit.author, login: c.author?.login }));
   const metadata = state.metadata;
-  pr = await getPR(gh, number);
-  if (pr.head.sha !== expected) throw new Retryable('Head changed during integration');
-  if (pr.base.ref !== target) throw new Retryable('Target branch changed during integration');
   const message = commitMessage(pr, metadata, result.reviewers, authors);
-  const merged = await gh.write(`integrate:${number}:${expected}`, 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', { pull_number: number, merge_method: 'squash', sha: expected, ...message }, async () => {
+  const snapshot = result.stack ?? await stackFor(gh, pr);
+  const merged = await submitMerge(gh, number, { key, actor, replyJob: policyAuto ? null : state.integrate_job ?? gh.job,
+    at: Date.now(), target: snapshot.target, snapshot: snapshot.fingerprint,
+    options: { sha: expected, merge_method: 'squash', merge_action: 'direct_merge', bypass_rules: false, ...message }
+  }, async () => {
     const current = await getPR(gh, number);
-    if (current.base.ref !== target || (!current.merged && current.head.sha !== expected)) throw new Retryable('PR changed before integration');
-    return current.merged && current.head.sha === expected ? { merged: true, sha: current.merge_commit_sha } : undefined;
+    if (current.head.sha !== expected) throw new Denied('Head changed during integration；请完成新提交的 CI 和审查后重新发送 /integrate。');
+    if (current.base.ref !== pr.base.ref) throw new Denied('Target branch changed during integration；请重新核实目标分支。');
+    const latest = await stackFor(gh, current);
+    if (latest.fingerprint !== snapshot.fingerprint || latest.waiting.length) throw new Denied('Stack、HEAD 或目标分支已改变，请等待 GitHub 更新并重新完成 CI 和审查。');
   });
-  if (merged && !merged.merged) throw new Retryable('GitHub refused merge');
-  if (merged?.merged) {
-    gh.commandResult = integratedMessage(gh, pr, merged.sha);
-    if (metadata.tag) await tagPR(gh, await getPR(gh, number), metadata.tag);
-  }
-  return !!merged?.merged;
+  if (merged && metadata.tag) await tagPR(gh, await getPR(gh, number), metadata.tag);
+  return merged;
 }
 export async function tagPR(gh: GitHub, pr: PR, tag: string) {
   if (!pr.merged || !pr.merge_commit_sha) throw new Denied('只能给已合并 PR 创建 Tag');
@@ -312,13 +334,15 @@ async function renderPR(gh: GitHub, pr: PR, state: PRState, result?: Gate, files
   await integrationNotice(gh, current, state, result);
   return more;
 }
-export async function refreshPR(gh: GitHub, number: number) {
+export async function refreshPR(gh: GitHub, number: number, track = true) {
+  if (track) await trackMerge(gh, number);
   const pr = await getPR(gh, number), state = await prState(gh, pr), files = await filesFor(gh, number);
   if (pr.merged && state.metadata.tag) await tagPR(gh, pr, state.metadata.tag);
   const result = pr.state === 'open' ? await gate(gh, pr, gh.config!.release.enabled && pr.base.ref === gh.config!.release.target, files) : undefined;
   return renderPR(gh, pr, state, result, files);
 }
 export async function reconcilePR(gh: GitHub, number: number, renderAll = false): Promise<boolean> {
+  await trackMerge(gh, number);
   let pr = await getPR(gh, number);
   await gh.ensureStatus(number);
   if (pr.state !== 'open') {

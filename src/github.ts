@@ -5,7 +5,7 @@ import { Denied, Retryable, names, sha256, statusCode, type Env, type PR } from 
 import { commentBody, decodeRecords, encodeRecord, recordMarkers, STATUS_MARKER, visibleComment, type NativeRecord } from './records';
 import { addressUser } from './mentions';
 
-export type Requester = { request: (route: string, parameters?: any) => Promise<{ data: any }> };
+export type Requester = { request: (route: string, parameters?: any) => Promise<{ data: any; status?: number }> };
 export class GitHub {
   readonly owner: string;
   readonly name: string;
@@ -15,6 +15,7 @@ export class GitHub {
   commandName?: string;
   commandResult?: string;
   readonly ciStartupRefreshes = new Map<number, { head: string; at: number }>();
+  readonly mergePolls = new Map<number, number>();
   private cacheEnabled = false;
   private readonly lists = new Map<string, Promise<any[]>>();
   private readonly observedPRs = new Map<number, string>();
@@ -25,7 +26,7 @@ export class GitHub {
   async read<T = any>(route: string, args: Record<string, unknown> = {}): Promise<T> {
     this.requests.reads++;
     const scope = route.includes('{owner}') && route.includes('{repo}') ? { owner: this.owner, repo: this.name } : {};
-    return (await this.api.request(route, { ...scope, ...args, request: { timeout: 20000 } })).data as T;
+    return (await this.api.request(route, { ...scope, ...args, headers: { 'x-github-api-version': '2026-03-10' }, request: { timeout: 20000 } })).data as T;
   }
   useReadCache() { this.cacheEnabled = true; }
   clearReadCache() { this.lists.clear(); }
@@ -87,7 +88,7 @@ export class GitHub {
   audit(action: string, outcome: string, detail: unknown = {}) {
     console.log(JSON.stringify({ service: 'piper', environment: this.env.ENVIRONMENT, repo: this.repo, job: this.job, actor: this.actor, action, outcome, detail, at: new Date().toISOString() }));
   }
-  async write<T = any>(key: string, route: string, args: Record<string, unknown>, reconcile: () => Promise<T | undefined>): Promise<T | null> {
+  async write<T = any>(key: string, route: string, args: Record<string, unknown>, reconcile: () => Promise<T | undefined>, decode?: (data: unknown, status?: number) => T): Promise<T | null> {
     await this.guard();
     const hash = await sha256(JSON.stringify({ route, args }));
     if (this.dryRun) {
@@ -99,7 +100,8 @@ export class GitHub {
       const recovered = await reconcile();
       await this.guard();
       if (recovered === undefined) this.requests.writes++;
-      const result = recovered ?? (await this.api.request(route, { owner: this.owner, repo: this.name, ...args, request: { timeout: 20000 } })).data as T;
+      const response = recovered === undefined ? await this.api.request(route, { owner: this.owner, repo: this.name, ...args, headers: { 'x-github-api-version': '2026-03-10' }, request: { timeout: 20000 } }) : undefined;
+      const result = recovered ?? (decode && response ? decode(response.data, response.status) : response!.data) as T;
       if (route === 'POST /repos/{owner}/{repo}/issues/{issue_number}/comments' || route === 'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}') {
         const number = Number(args.issue_number);
         if (Number.isSafeInteger(number)) await this.rememberComment(number, result);

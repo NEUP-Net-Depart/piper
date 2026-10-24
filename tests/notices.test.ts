@@ -49,7 +49,7 @@ describe('Skara integration notification lifecycle', () => {
     const expected = commitMessage(api.pr, (await prState(gh, api.pr)).metadata, ['bob'], [{ name: 'Alice', email: 'alice@example.com' }]);
     expect(readyRows(api)[0].body).toContain('````\n' + expected.commit_title + '\n\n' + expected.commit_message + '\n````');
     await command(gh, api, 2, '/integrate');
-    const merge = api.writes().find(c => c.route.endsWith('/merge'))!;
+    const merge = api.writes().find(c => c.route.endsWith('/merge-async'))!;
     expect(merge.args.commit_title).toBe(expected.commit_title); expect(merge.args.commit_message).toBe(expected.commit_message);
     expect(merge.args.merge_method).toBe('squash');
   });
@@ -117,7 +117,7 @@ describe('Skara integration notification lifecycle', () => {
       return request(route, args);
     };
     await expect(command(gh, api, 1, '/integrate auto')).rejects.toThrow('自动集成');
-    expect(api.writes().some(c => c.route.endsWith('/merge'))).toBe(false);
+    expect(api.writes().some(c => c.route.endsWith('/merge-async'))).toBe(false);
   });
 
   it('updates the notice on close and reopen, and adds no extra welcome or thanks', async () => {
@@ -184,8 +184,9 @@ describe('explicit manual and automatic integration', () => {
       if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}' && ++reads === 3) api.pr.base.ref = 'main';
       return request(route, args);
     };
-    await expect(command(gh, api, 1, '/integrate')).rejects.toThrow('Target branch changed');
-    expect(api.writes().some(c => c.route.endsWith('/merge'))).toBe(false);
+    await command(gh, api, 1, '/integrate');
+    expect(api.comments.map(c => c.body).join('\n')).toContain('Target branch changed');
+    expect(api.writes().some(c => c.route.endsWith('/merge-async'))).toBe(false);
   });
 
   it('uses the release command and Merge Commit preview for scheduled production PRs', async () => {

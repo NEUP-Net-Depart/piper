@@ -9,7 +9,7 @@ export function coordinatorKey(job: Job, repositoryOnly = false) {
   return job.repo.toLowerCase() + (repositoryOnly || !job.number ? ':repository' : ':issue:' + job.number);
 }
 export async function coordinate(env: Env, job: Job, repositoryOnly = false): Promise<JobResult> {
-  if (!job || typeof job.repo !== 'string' || typeof job.id !== 'string' || !['command', 'welcome', 'scan', 'release', 'reconcile', 'status', 'notice', 'labels'].includes(job.kind) || !allowed(env, job.repo) || !Number.isSafeInteger(job.installation) || job.installation <= 0) return 'ack';
+  if (!job || typeof job.repo !== 'string' || typeof job.id !== 'string' || !['command', 'welcome', 'scan', 'release', 'reconcile', 'status', 'notice', 'labels', 'merge-poll'].includes(job.kind) || !allowed(env, job.repo) || !Number.isSafeInteger(job.installation) || job.installation <= 0) return 'ack';
   if (!['scan', 'release'].includes(job.kind) && (!Number.isSafeInteger(job.number) || job.number! <= 0)) return 'ack';
   if (stopped(env, job.repo)) return 'retry';
   if (!env.COORDINATORS) throw new Retryable('Task coordinator binding is required');

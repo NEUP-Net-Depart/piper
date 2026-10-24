@@ -30,9 +30,15 @@ export class FakeGitHub implements Requester {
   prs: any[] = [];
   extra?: (route: string, args: any) => Promise<any | undefined>;
   failAfterComment = false;
-  async request(route: string, args: any = {}): Promise<{ data: any }> {
+  mergeImmediately = true;
+  mergeOptions?: any;
+  mergeResults: any[] = [];
+  stacks: any[] = [];
+  readonly mergeUUID = '630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42';
+  merged() { this.pr.merged = true; this.pr.state = 'closed'; this.pr.merged_at = new Date().toISOString(); this.pr.merge_commit_sha = 'merge123'; }
+  async request(route: string, args: any = {}): Promise<{ data: any; status?: number }> {
     this.calls.push({ route, args });
-    if (this.extra) { const value = await this.extra(route, args); if (value !== undefined) return { data: value }; }
+    if (this.extra) { const value = await this.extra(route, args); if (value !== undefined) return { data: value, status: route.endsWith('/merge-async') && value.status === 'pending' ? 202 : 200 }; }
     if (route === 'GET /repos/{owner}/{repo}') return { data: { full_name: repo, default_branch: 'main', private: false } };
     if (route === 'GET /repos/{owner}/{repo}/installation') return { data: { id: 1 } };
     if (route === 'GET /repos/{owner}/{repo}/issues/{issue_number}') return { data: { number: this.pr.number, user: this.pr.user, pull_request: {} } };
@@ -40,6 +46,7 @@ export class FakeGitHub implements Requester {
     if (route.includes('/collaborators/{username}/permission')) return { data: { permission: this.permissions[args.username] ?? 'none' } };
     if (route === 'GET /repos/{owner}/{repo}/contents/{path}') return { data: { type: 'file', encoding: 'base64', content: btoa(this.config), size: this.config.length, sha: 'config123' } };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: structuredClone(this.pr) };
+    if (route === 'GET /repos/{owner}/{repo}/stacks') return { data: structuredClone(this.stacks) };
     if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') { this.pr.body = args.body; return { data: structuredClone(this.pr) }; }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files') return { data: this.files };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews') return { data: this.reviews };
@@ -66,7 +73,17 @@ export class FakeGitHub implements Requester {
     }
     if (route === 'DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers') { this.pr.requested_reviewers = this.pr.requested_reviewers.filter(x => !args.reviewers.includes(x.login)); return { data: this.pr }; }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/commits') return { data: [{ commit: { author: { name: 'Alice', email: 'alice@example.com' } } }] };
-    if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge') { this.pr.merged = true; this.pr.state = 'closed'; this.pr.merged_at = new Date().toISOString(); this.pr.merge_commit_sha = 'merge123'; return { data: { merged: true, sha: 'merge123' } }; }
+    if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge') { this.merged(); return { data: { merged: true, sha: 'merge123' } }; }
+    if (route === 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async') {
+      this.mergeOptions = args;
+      if (this.mergeImmediately) this.merged();
+      return { status: 202, data: this.pendingMerge() };
+    }
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}') {
+      const data = this.mergeResults.shift() ?? { status: 'merged', details: { message: 'Pull request successfully merged.', sha: 'merge123' } };
+      if (data.status === 'merged') this.merged();
+      return { status: 200, data };
+    }
     if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') {
       if (args.ref.startsWith('heads/')) return { data: { object: { sha: args.ref === 'heads/dev' ? 'abc123' : 'base123' } } };
       const sha = this.tags.get(args.ref.replace('tags/', ''));
@@ -92,6 +109,10 @@ export class FakeGitHub implements Requester {
     throw new Error(`Unexpected GitHub request: ${route}`);
   }
   writes() { return this.calls.filter(x => !x.route.startsWith('GET ')); }
+  pendingMerge(overrides: Record<string, unknown> = {}) {
+    return { status: 'pending', details: { message: 'Merge request is in progress.', uuid: this.mergeUUID,
+      expected_head_sha: this.pr.head.sha, merge_method: 'squash', merge_action: 'direct_merge', bypass_rules: false, ...overrides } };
+  }
 }
 export async function fixture(config = '', overrides: Partial<Env> = {}) {
   const environment = testEnv(overrides), api = new FakeGitHub();

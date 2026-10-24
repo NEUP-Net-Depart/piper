@@ -75,7 +75,7 @@ describe('merge gates and attribution', () => {
   it('requires SHA-pinned squash and preserves authors and reviewers', async () => {
     const { gh, api } = await fixture();
     await integrate(gh, 1, 'alice', 'abc123');
-    const merged = api.writes().find(c => c.route.endsWith('/merge'))!;
+    const merged = api.writes().find(c => c.route.endsWith('/merge-async'))!;
     expect(merged.args).toMatchObject({ sha: 'abc123', merge_method: 'squash', commit_title: 'fix: repair booking (#1)' });
     expect(merged.args.commit_message).not.toContain('Co-authored-by: Alice <alice@example.com>');
     expect(merged.args.commit_message).toContain('Reviewed-by: bob');
@@ -90,7 +90,7 @@ describe('merge gates and attribution', () => {
   it('never auto-merges a high risk PR solely from auto mode', async () => {
     const { gh, api } = await fixture('merge:\n  auto: true\nreviewers:\n  count: 0');
     api.files = [{ filename: 'migrations/change.sql' }];
-    await reconcilePR(gh, 1); expect(api.writes().some(x => x.route.endsWith('/merge'))).toBe(false);
+    await reconcilePR(gh, 1); expect(api.writes().some(x => x.route.endsWith('/merge-async'))).toBe(false);
   });
   it('deduplicates contributor emails and rejects trailer line injection', () => {
     const message = commitMessage(pull(), { summary: 'Summary', contributors: [{ name: 'A', email: 'a@e.com' }, { name: 'B\nReviewed-by: fake', email: 'b@e.com' }], author: { name: 'A', email: 'a@e.com' } }, ['bob'], []);

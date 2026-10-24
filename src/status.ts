@@ -1,6 +1,7 @@
 import type { GitHub } from './github';
 import { commitMessage, integratedMessage } from './commits';
 import { STATUS_MARKER } from './records';
+import { mergeFeedback } from './merging';
 import { Denied, Retryable, safeText, sha256, type Gate, type PR, type PRState } from './types';
 import { profile, userReference } from './mentions';
 
@@ -37,6 +38,7 @@ function fenced(value: string) {
 
 function integrationSteps(gh: GitHub, pr: PR, state: PRState, ready: boolean, policyAuto = false, autoRequestValid = true) {
   const cfg = gh.config!, release = cfg.release.enabled && pr.base.ref === cfg.release.target;
+  if (!release && state.merge && (!state.merge.result || state.merge.result.status !== 'merged')) return [mergeFeedback(state.merge)];
   if (release) return ready
     ? ['**维护者**：确认上方提交信息后，在新评论中发送：', '', fenced('/release publish'), '', '使用 Merge Commit 保留提交历史。部署成功后创建版本 Tag 和 Release。']
     : [];
@@ -60,6 +62,7 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   const url = `https://github.com/${gh.repo}/pull/${pr.number}`;
   const lines = ['### Piper Progress', ''];
   lines.push(`分支：${plain(pr.head.ref)} → ${plain(pr.base.ref)} · 当前提交：[${pr.head.sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${pr.head.sha})`, '');
+  if (result?.stack?.detail) lines.push(plain(result.stack.detail), '');
   if (pr.merged) {
     lines.push('**已合并**', '');
     if (pr.merge_commit_sha) lines.push(`合并提交：[${pr.merge_commit_sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${pr.merge_commit_sha})`, '');
@@ -74,17 +77,20 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
     const reviews = pending.filter(p => p.owner === '审查者' && p.action);
     const waiting = pending.filter(p => p.owner === '等待');
     const reviewers = [...new Set(pr.requested_reviewers.map(r => r.login))].sort().map(profile).join('、');
-    lines.push(result.ready ? '**检查已满足，等待合并。**' : actions.length ? '**需要处理以下事项。**' : '**等待检查或审查，作者暂时无需操作。**', '');
+    const mergeStatus = state.merge?.result?.status;
+    lines.push(state.merge ? mergeStatus === 'failed' ? '**合并失败。**' : mergeStatus === 'unknown' ? '**合并结果暂时无法确认。**' : mergeStatus === 'enqueued' ? '**等待 GitHub Merge Queue。**' : '**正在核实异步合并结果。**'
+      : result.ready ? '**检查已满足，等待合并。**' : actions.length ? '**需要处理以下事项。**' : '**等待检查或审查，作者暂时无需操作。**', '');
     if (actions.length) lines.push('#### 需要处理', '', ...actions.map(p => `- **${p.owner ?? '维护者'}**：${plain(p.action!)}`), '');
     if (reviews.length) lines.push('#### 等待处理', '', ...reviews.map(p => `- **审查者** ${reviewers}：${plain(p.action!)} ${plain(p.detail)}。`), '');
     if (waiting.length) lines.push('#### 等待系统检查', '', ...waiting.map(p => `- ${plain(p.name)}：${plain(p.detail)}。`), '');
-    if (result.ready) {
+    if (state.merge) lines.push(mergeFeedback(state.merge), '');
+    if (result.ready && !state.merge) {
       const automatic = result.autoRequestValid !== false && !release && state.integration === 'requested' && state.integrate_mode === 'auto' && state.integrate_head === pr.head.sha;
       lines.push(policyAuto ? '**仓库自动集成已启用**，等待核验并合并，无需发送命令。' : automatic ? '**已开启自动集成**，等待核验并合并。取消：`/integrate cancel`。' : `**${release ? '维护者' : '作者或维护者'}**：核对就绪通知中的最终提交信息，在新评论中发送 \`${release ? '/release publish' : '/integrate'}\`。`, '');
       if (release) lines.push('使用 Merge Commit；部署成功后创建版本 Tag 和 Release。', '');
     }
     // Request lifecycle belongs in the status; the ready notice carries the preview.
-    if (!policyAuto && (result.autoRequestValid === false || !result.ready || state.integration !== 'requested' || state.integrate_mode !== 'auto')) lines.push(...integrationSteps(gh, pr, state, false, policyAuto, result.autoRequestValid));
+    if (!state.merge && !policyAuto && (result.autoRequestValid === false || !result.ready || state.integration !== 'requested' || state.integrate_mode !== 'auto')) lines.push(...integrationSteps(gh, pr, state, false, policyAuto, result.autoRequestValid));
     if (result.highRisk) lines.push('', release ? '发布需要当前提交的人工批准和维护者确认。' : '高风险变更：需要当前提交的人工批准和显式集成请求。');
     lines.push('', `[检查详情（CI）](${url}/checks) · [审查意见](${url}/files) · 帮助：\`/help\``, '', '#### 检查进度', '');
     for (const item of result.progress) lines.push(`- [${item.ready ? 'x' : ' '}] ${plain(item.name)}：${plain(item.detail)}`);
@@ -139,14 +145,14 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   const comments = await gh.list('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', { issue_number: pr.number });
   const existing = comments.find(c => c.user?.login === gh.env.BOT_LOGIN && c.user?.type === 'Bot' && c.body?.startsWith(READY_MARKER));
   const link = progressURL(gh, pr.number);
-  if (!result?.ready || pr.state !== 'open') {
-    const pending = ['当前尚未满足合并条件，请查看协作进度。', '', `[查看待处理事项与检查进度](${link})。`, '', ...integrationSteps(gh, pr, state, false, false, result?.autoRequestValid)].join('\n').trimEnd();
-    if (existing) await gh.managedComment(pr.number, READY_MARKER, pr.merged ? `此 PR 已合并。[查看结果](${link})。` : pr.state !== 'open' ? `此 PR 已关闭，未合并。[查看状态](${link})。` : pending);
+  if (!result?.ready || pr.state !== 'open' || state.merge && !pr.merged) {
+    const pending = [state.merge ? mergeFeedback(state.merge) : '当前尚未满足合并条件，请查看协作进度。', '', `[查看待处理事项与检查进度](${link})。`, '', ...(state.merge ? [] : integrationSteps(gh, pr, state, false, false, result?.autoRequestValid))].join('\n').trimEnd();
+    if (existing && !(pr.merged && state.merge && !state.merge.intent.replyJob)) await gh.managedComment(pr.number, READY_MARKER, pr.merged ? `此 PR 已合并。[查看结果](${link})。` : pr.state !== 'open' ? `此 PR 已关闭，未合并。[查看状态](${link})。` : pending);
     if (pr.merged && pr.merge_commit_sha) {
       const message = integratedMessage(gh, pr);
-      const job = state.release_job ?? state.integrate_job;
-      if (job) await gh.replyFor(pr.number, job, message, state.release_job ? state.release_actor : state.integrate_actor ?? undefined);
-      else await gh.managedComment(pr.number, INTEGRATED_MARKER, message);
+      const job = state.release_job ?? (state.merge ? state.merge.intent.replyJob : state.integrate_job);
+      if (job) await gh.replyFor(pr.number, job, message, state.release_job ? state.release_actor : state.merge?.intent.actor ?? state.integrate_actor ?? undefined);
+      else await gh.managedComment(pr.number, state.merge ? READY_MARKER : INTEGRATED_MARKER, message);
     }
     return;
   }

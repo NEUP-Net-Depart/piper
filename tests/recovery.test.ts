@@ -24,7 +24,7 @@ const command = (gh: GitHub, api: FakeGitHub, id: number, body: string, actor = 
 const count = (api: FakeGitHub, route: string) => api.calls.filter(c => c.route === route).length;
 const reviewerPost = 'POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers';
 const reviewerDelete = 'DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers';
-const mergeRoute = 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge';
+const mergeRoute = 'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge-async';
 
 describe('review recovery from native plans and timelines', () => {
   it('does not request again after a lost response and a review submitted before retry', async () => {
@@ -83,7 +83,7 @@ describe('command state without local persistence', () => {
   });
   it('resumes an interrupted merge by tagging the actual merge SHA only once', async () => {
     const { gh, api } = await fixture(); await command(gh,api,1,'/tag completed');
-    loseResponse(api,mergeRoute); await expect(command(gh,api,2,'/integrate')).rejects.toThrow('Response lost');
+    loseResponse(api,mergeRoute); await command(gh,api,2,'/integrate');
     await command(gh,api,2,'/integrate'); expect(count(api,mergeRoute)).toBe(1); expect(api.tags.get('completed')).toBe('merge123');
   });
   it('recovers a lost command completion receipt without undoing a later human change', async () => {

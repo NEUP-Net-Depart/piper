@@ -113,6 +113,7 @@ export async function executeCommand(gh: GitHub, number: number, actor: string, 
       await pinHead(pr.head.sha);
       if (pr.merged) { await integrate(gh, number, actor, pr.head.sha); return; }
       await save({ kind: 'integrate', cancelled: false, mode: args === 'auto' ? 'auto' : 'manual' });
+      await reply('命令已接收，正在核验当前提交、CI、人工批准与 Stack 依赖。');
       const intent = await prState(gh, pr);
       if (gh.dryRun || (intent.integrate_head === pr.head.sha && intent.integrate_actor === actor)) await integrate(gh, number, actor, pr.head.sha);
       return;

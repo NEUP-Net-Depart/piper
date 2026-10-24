@@ -5,6 +5,7 @@ import { getPR, reconcilePR, refreshPR, welcome } from './pulls';
 import { listReleases, prepareRelease, syncRelease } from './releases';
 import { Denied, names, sha256, type Env, type Job, type PR } from './types';
 import { addressUser } from './mentions';
+import { trackMerge } from './merging';
 
 export async function installationFor(env: Env, repo: string, api = appApi(env)): Promise<number> {
   if (!allowed(env,repo)) throw new Denied('Repository outside allowlist');
@@ -40,6 +41,9 @@ async function dispatch(gh: GitHub, job: Job) {
     }
     // Enqueue after the receipt, including on retry after a lost Queue acknowledgement.
     if (!gh.dryRun && issue.pull_request && command.name !== 'help' && !(command.name === 'release' && command.args === 'status') && !(command.name === 'reviewers' && !command.args)) await refresh();
+  } else if (job.kind === 'merge-poll') {
+    await trackMerge(gh, job.number!, job.failures ?? 0);
+    await refreshPR(gh, job.number!, false);
   } else if (job.kind === 'welcome') {
     const issue = await gh.read('GET /repos/{owner}/{repo}/issues/{issue_number}', { issue_number: job.number });
     if (!issue.pull_request) await welcome(gh, job.number!, issue.user, 'issue');
@@ -89,6 +93,11 @@ export async function processJob(env: Env, job: Job, api?: Requester): Promise<'
     if (job.checkName && !gh.config.merge.requiredChecks.includes(job.checkName) && !gh.config.release.requiredChecks.includes(job.checkName)) { gh.audit('job', 'irrelevant-check'); return 'ack'; }
     gh.audit('configuration','loaded',{ ref: repo.default_branch, sha: file.sha, defaultsHash: await sha256(env.ORG_DEFAULTS) });
     await dispatch(gh,job);
+    if (!gh.dryRun) for (const [number, failures] of gh.mergePolls) {
+      const delaySeconds = Math.min(900, 30 * 2 ** failures);
+      await env.TASKS.send({ id: 'merge-poll:' + crypto.randomUUID(), repo: gh.repo, installation: job.installation,
+        kind: 'merge-poll', number, failures, time: new Date(Date.now() + delaySeconds * 1000).toISOString() }, { delaySeconds });
+    }
     if (!gh.dryRun) for (const [number, retry] of gh.ciStartupRefreshes) {
       const key = 'ci-startup-queued:' + retry.head;
       if (await gh.getRecord(number, key)) continue;

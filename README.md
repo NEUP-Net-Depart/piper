@@ -233,6 +233,12 @@ release:
 
 自动集成请求人的写权限在刷新和执行时复核；失权后移除自动集成标签并提示重新请求。`merge.auto` 是独立的仓库规则，`/integrate cancel` 仅取消命令登记的自动请求，不会关闭它。
 
+普通集成统一使用 GitHub 异步合并 API（版本 `2026-03-10`），绑定已核验的 HEAD，指定 Squash、直接合并且不绕过规则。命令回执表示命令已处理；GitHub 受理后，Piper 更新同一回复及 PR Progress，直到确认成功或失败。`/integrate cancel` 不会撤回 GitHub 已受理的请求。
+
+GitHub 原生 Stack 按最终目标分支检查 `allowedBases`，保留直接父分支及下层依赖信息。Piper 只集成当前没有未合并下层依赖的一条 PR；例如 #72 → #74 必须先集成 #72，等待 GitHub 更新 #74 的父分支和 HEAD，再重新完成 CI、当前提交审查及集成。提交前重查 HEAD、Stack 成员和顺序；无法核实则停止。Piper 不创建、调整、Rebase 或整组合并 Stack，也不管理 Merge Queue。
+
+合并意图、UUID 和最终结果保存在 Bot 评论回执中，延迟 Queue 任务查询进度，Cron/状态刷新可恢复丢失的轮询。临时查询故障最多连续重试五次。提交响应丢失时只观察 PR，不盲目重新发起请求；UUID 过期、超过 24 小时或结果无法可靠确认时停止并提示维护者核实。GitHub 不提供 Stack 版本锁，最后一次核验与 GitHub 执行之间仍可能发生外部变更；受理后 Piper 无法撤回该请求。
+
 ### 标签与模块审查规则
 
 每条 `labels` 规则必须有唯一的 `name`（1–50 字符）。`files`、`branches`、`titlePrefixes` 任一条件匹配即生效；都为空则不匹配。`branches` 匹配 PR 源分支，`titlePrefixes` 忽略大小写，`files` 同时检查重命名前后的路径。
