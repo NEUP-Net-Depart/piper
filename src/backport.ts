@@ -50,7 +50,7 @@ export async function backport(gh: GitHub, pr: PR, target: string) {
     else if (old && next && dest && old.mode === next.mode && old.mode === dest.mode) {
       try { changes.push({ path, mode: next.mode, type: 'blob', content: applyBackport(await blob(gh, old.sha), await blob(gh, next.sha), await blob(gh, dest.sha)) }); }
       catch (e) {
-        if (e instanceof Denied) throw new Denied(`无法自动将 ${pr.merge_commit_sha} 的补丁移植到 ${target}：${e.message.replace(/[。.!]+$/, '')}。请手动移植该合并提交相对第一父提交的补丁，解决冲突后创建 PR。`);
+        if (e instanceof Denied) throw new Denied(`无法自动将 ${pr.merge_commit_sha} 的补丁移植到 ${target}：${e.message.replace(/[。.!]+$/, '')}。请手动移植该合并提交相对第一父提交的补丁，解决冲突后创建 PR。`, { cause: e });
         throw e;
       }
     }

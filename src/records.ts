@@ -72,7 +72,7 @@ export async function prState(gh: GitHub, pr: PR): Promise<PRState> {
       case 'author': state.metadata.author = c.value; break;
       case 'tag': state.metadata.tag = c.value; break;
       case 'reviewers-count': state.metadata.requiredReviews = c.value; break;
-      case 'label': (state.metadata.labels ??= {})[c.name.toLowerCase()] = { name: c.name, mode: c.mode, at: c.at }; break;
+      case 'label': state.metadata.labels ??= {}; state.metadata.labels[c.name.toLowerCase()] = { name: c.name, mode: c.mode, at: c.at }; break;
       case 'contributor-add': state.metadata.contributors = [...(state.metadata.contributors ?? []).filter(a => a.email.toLowerCase() !== c.value.email.toLowerCase()), c.value]; break;
       case 'contributor-remove': state.metadata.contributors = (state.metadata.contributors ?? []).filter(a => a.email.toLowerCase() !== c.value.toLowerCase()); break;
       case 'integrate':

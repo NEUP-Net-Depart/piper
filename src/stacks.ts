@@ -42,6 +42,6 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
     };
   } catch (e) {
     gh.audit('stack', 'unverified', { number: pr.number, message: e instanceof Error ? e.message : 'Invalid stack' });
-    throw new Denied('无法可靠核实 Stack 状态。请等待 GitHub 更新 Stack 后重试；Piper 不会合并本次请求。');
+    throw new Denied('无法可靠核实 Stack 状态。请等待 GitHub 更新 Stack 后重试；Piper 不会合并本次请求。', { cause: e });
   }
 }
