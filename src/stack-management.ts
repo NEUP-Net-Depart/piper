@@ -48,7 +48,7 @@ async function historyFor(gh: GitHub, number: number): Promise<History> {
     new Set(plan.members.map((m) => m.number)).size !== plan.members.length ||
     !plan.members.some((m) => m.number === number)
   )
-    throw new Denied('Stack 恢复回执不一致，请维护者检查原始 Bot 评论。');
+    throw new Denied('Stack暂停：恢复回执不一致');
   const done = records.find((r) => r.key === 'stack-done:' + plan.id);
   return { records, plan, done: done && doneSchema.parse(done.value) };
 }
@@ -80,9 +80,10 @@ function owned(stack: NativeStack, history: History) {
   );
 }
 const desiredBase = (plan: Plan, index: number) => (index ? plan.members[index - 1]!.ref : plan.target);
-const manual =
-  '检测到已管理的 Stack 被修改，已暂停自动操作。请维护者核对 GitHub Stack；如需手动接管，可关闭 stack.enabled。';
-const external = '已有 Stack 由开发者管理，Piper 不会自动追加。请维护者在 GitHub 确认新 PR 的归属。';
+const manual = '已管理的 Stack 被修改，已暂停自动操作，可通过 stack.enabled关闭自动管理';
+const external = 'Stack暂停：监测到已有手动Stack';
+const pausedMessage = (message: string) =>
+  message.startsWith('Stack') || message === manual ? message : 'Stack 已暂停：' + message;
 async function manualBaseEvent(gh: GitHub, number: number) {
   const events = await gh.list(
     'GET /repos/{owner}/{repo}/issues/{issue_number}/timeline',
@@ -109,22 +110,21 @@ export async function dependencyFor(gh: GitHub, pr: PR): Promise<StackInfo | und
     current.base.ref !== pr.base.ref ||
     current.base.sha !== pr.base.sha
   )
-    throw new Denied('PR 或依赖图正在更新，请等待 Piper 重新核验。');
+    throw new Denied('正在等待PR或依赖图更新');
   const history = await historyFor(gh, pr.number),
     native = graph.native.get(pr.number);
   const target = graph.targets.get(pr.number) ?? history.plan?.target ?? pr.base.ref;
   let blocked = graph.problems.get(pr.number),
-    owner: StackInfo['owner'] = blocked?.startsWith('Stack 正在更新') ? '等待' : '维护者';
+    owner: StackInfo['owner'] =
+      blocked?.startsWith('正在等待') || blocked?.startsWith('Stack暂停：状态未同步') ? '等待' : '维护者';
   if (!blocked && history.plan && !history.done) {
     const failure = history.records.find((r) => r.key.startsWith('stack-failure:' + history.plan!.id + ':'));
     const paused = history.records.filter((r) => r.key.startsWith('stack-paused:' + history.plan!.id + ':')).at(-1);
     blocked = paused
-      ? 'Stack 已暂停：' +
-        z.object({ message: z.string() }).parse(paused.value).message +
-        ' 请维护者核对 GitHub Stack 和分支状态。'
+      ? pausedMessage(z.object({ message: z.string() }).parse(paused.value).message)
       : failure
-        ? 'GitHub 未接受 Stack 操作。请维护者检查 Stack 冲突和 App 权限；Piper 会在后续对账中重试。'
-        : 'Stack 尚未建立完成，Piper 将在队列重试或定时对账时继续；完成前暂停集成。';
+        ? 'Stack失败：github未接受'
+        : '正在等待stack建立';
     owner = failure || paused ? '维护者' : '等待';
   }
   if (!blocked && history.done && (!native || !owned(native, history))) blocked = manual;
@@ -138,9 +138,9 @@ export async function dependencyFor(gh: GitHub, pr: PR): Promise<StackInfo | und
       blocked = managedElsewhere
         ? external
         : gh.dryRun || gh.config.stack.dryRun
-          ? 'Stack Dry-run：仅预演，未修改 Base 或创建 Stack。请维护者检查日志后关闭 Dry-run。'
-          : '已确认线性依赖，等待 Piper 建立或追加原生 Stack；完成前暂停集成。';
-      owner = managedElsewhere || gh.dryRun || gh.config.stack.dryRun ? '维护者' : '等待';
+          ? '正在等待stack建立'
+          : '正在建立pr Stack';
+      owner = managedElsewhere ? '维护者' : '等待';
     }
   }
   const index = members.indexOf(pr.number);
@@ -162,8 +162,7 @@ export async function dependencyFor(gh: GitHub, pr: PR): Promise<StackInfo | und
 async function validatePlan(gh: GitHub, plan: Plan) {
   const graph = await dependencyGraph(gh),
     numbers = plan.members.map((m) => m.number);
-  if (JSON.stringify(graphComponent(graph, numbers[0]!)) !== JSON.stringify(numbers))
-    throw new Denied('依赖图已改变，已暂停本次 Stack 操作。');
+  if (JSON.stringify(graphComponent(graph, numbers[0]!)) !== JSON.stringify(numbers)) throw new Denied('依赖图已变化');
   for (const [index, expected] of plan.members.entries()) {
     const pr = graph.prs.get(expected.number);
     if (
@@ -174,12 +173,12 @@ async function validatePlan(gh: GitHub, plan: Plan) {
       pr.head.ref !== expected.ref ||
       ![expected.base, desiredBase(plan, index)].includes(pr.base.ref)
     )
-      throw new Denied('HEAD、Base 或依赖关系已改变，已保留当前分支并暂停 Stack 操作。');
+      throw new Denied('HEAD、Base 或依赖已变化');
     if ((await manualBaseEvent(gh, pr.number)) !== expected.baseEvent) throw new Denied(manual);
     const history = await historyFor(gh, pr.number),
       merge = mergeState(history.records);
     if (merge && (!merge.result || ['unknown', 'enqueued'].includes(merge.result.status)))
-      throw new Denied('下层 PR 的合并结果尚未确认，等待 GitHub 更新后再管理 Stack。');
+      throw new Denied('下层 PR 合并结果未确认');
   }
   const natives = [
     ...new Map(
@@ -189,7 +188,7 @@ async function validatePlan(gh: GitHub, plan: Plan) {
       }),
     ).values(),
   ];
-  if (natives.length > 1) throw new Denied('依赖涉及多个已有 Stack，已暂停自动操作。');
+  if (natives.length > 1) throw new Denied('涉及多个 Stack');
   const native = natives[0];
   if (native && matchesPlan(native, plan)) return { graph, complete: native };
   if (plan.existing ? JSON.stringify(native) !== JSON.stringify(plan.existing) : !!native) throw new Denied(manual);
@@ -206,11 +205,11 @@ async function freshMember(gh: GitHub, plan: Plan, index: number) {
     pr.head.ref !== expected.ref ||
     ![expected.base, desiredBase(plan, index)].includes(pr.base.ref)
   )
-    throw new Denied('PR 在 Stack 操作前已改变，已暂停自动操作。');
+    throw new Denied('PR 已变化');
   const ref = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/' + expected.ref });
-  if (ref.object.sha !== expected.head) throw new Denied('源分支已更新，等待 GitHub 同步 HEAD 后重试。');
-  if (pr.mergeable === null) throw new Retryable('GitHub 尚未完成 Stack 冲突检查');
-  if (pr.mergeable !== true) throw new Denied('PR 存在冲突，已暂停自动 Stack。');
+  if (ref.object.sha !== expected.head) throw new Denied('源分支 HEAD 未同步');
+  if (pr.mergeable === null) throw new Retryable('正在等待Stack冲突检查');
+  if (pr.mergeable !== true) throw new Denied('PR 存在冲突');
   return pr;
 }
 async function finishPlan(gh: GitHub, plan: Plan, stack: NativeStack) {
@@ -265,18 +264,18 @@ async function applyPlan(gh: GitHub, plan: Plan) {
       if (checked.complete) return checked.complete;
       for (let i = 0; i < plan.members.length; i++) {
         const current = await freshMember(gh, plan, i);
-        if (current.base.ref !== desiredBase(plan, i)) throw new Denied('Stack 的 Base 链尚未就绪，已暂停创建。');
+        if (current.base.ref !== desiredBase(plan, i)) throw new Denied('Base 链未就绪');
       }
       const final = await validatePlan(gh, plan);
       if (final.complete) return final.complete;
       if (plan.members.some((m, i) => final.graph.prs.get(m.number)?.base.ref !== desiredBase(plan, i)))
-        throw new Denied('Stack 的 Base 链尚未就绪，已暂停创建。');
+        throw new Denied('Base 链未就绪');
       return undefined;
     },
   );
   if (!result) return;
   const checked = await validatePlan(gh, plan);
-  if (!checked.complete) throw new Retryable('GitHub 尚未返回完整 Stack');
+  if (!checked.complete) throw new Retryable('正在等待Stack同步');
   await finishPlan(gh, plan, checked.complete);
   gh.stackRefreshes.set(plan.members[0]!.number, plan.id + ':complete');
 }
@@ -289,7 +288,7 @@ async function componentPlan(gh: GitHub, graph: DependencyGraph, members: number
   ];
   if (pending.length) {
     const latest = pending.find((p) => pending.every((other) => other.id === p.id || p.supersedes.includes(other.id)));
-    if (!latest) throw new Denied('存在不一致的 Stack 恢复计划，请维护者检查 Bot 回执。');
+    if (!latest) throw new Denied('恢复计划不一致');
     // New commits can resume a partially prepared chain after proving the same edges again.
     // A human Base edit is a separate instruction and must never be silently reversed.
     if (
@@ -329,7 +328,7 @@ async function componentPlan(gh: GitHub, graph: DependencyGraph, members: number
       }),
     ).values(),
   ];
-  if (natives.length > 1) throw new Denied('依赖涉及多个已有 Stack，已暂停自动操作。');
+  if (natives.length > 1) throw new Denied('涉及多个 Stack');
   const existing = natives[0];
   if (existing && members.every((n) => graph.native.get(n)?.id === existing.id)) return;
   if (members.length < 2) return;

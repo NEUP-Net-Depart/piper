@@ -451,7 +451,7 @@ async function integrateCurrent(
         throw new Denied('Target branch changed during integration；请重新核实目标分支。');
       const latest = await stackFor(gh, current);
       if (latest.fingerprint !== snapshot.fingerprint || latest.waiting.length || latest.blocked)
-        throw new Denied('Stack、HEAD 或目标分支已改变，请等待 GitHub 更新并重新完成 CI 和审查。');
+        throw new Denied('Stack暂停：HEAD、Base 或依赖已变化');
     },
   );
   if (merged && metadata.tag) await tagPR(gh, await getPR(gh, number), metadata.tag);

@@ -168,7 +168,7 @@ describe('automatic dependency discovery', () => {
     expect((await dependencyGraph(f.gh)).parents.get(74)).toBe(72);
     const before = await gate(f.gh, f.api.pr);
     expect(before.ready).toBe(false);
-    expect(before.reasons.join(' ')).toContain('等待 Piper');
+    expect(before.reasons.join(' ')).toContain('正在建立pr Stack');
     expect(before.progress.find((p) => p.name === 'Stack 依赖')!.detail).not.toContain('可独立集成');
     await manageStacks(f.gh);
     expect(f.api.stackWrites().map((c) => [c.route, c.args.pull_number ?? c.args.pull_requests])).toEqual([
@@ -219,7 +219,7 @@ describe('automatic dependency discovery', () => {
     f.api.parents.set('sha74', ['shared']);
     await manageStacks(f.gh);
     expect(f.api.stackWrites()).toHaveLength(0);
-    expect((await stackFor(f.gh, f.api.pr)).blocked).toContain('当前 HEAD 已分叉');
+    expect((await stackFor(f.gh, f.api.pr)).blocked).toContain('HEAD 已分叉');
   });
   it.each(['fork', 'release', 'different-target', 'already-in-target'])('excludes %s dependencies', async (mode) => {
     const f = context();
@@ -290,7 +290,7 @@ describe('automatic dependency discovery', () => {
     };
     await manageStacks(resume(f));
     expect(f.api.stackWrites()).toHaveLength(0);
-    await expect(stackFor(resume(f), f.api.pr)).rejects.toThrow('App 具备 Pull requests');
+    await expect(stackFor(resume(f), f.api.pr)).rejects.toThrow('Stack失败：无法读取github Stack');
   });
 });
 
@@ -304,7 +304,7 @@ describe('idempotent native Stack management and recovery', () => {
       if (mode === 'environment') f.env.DRY_RUN = 'true';
       await manageStacks(f.gh);
       expect(f.api.writes()).toHaveLength(0);
-      expect((await stackFor(f.gh, f.api.pr)).blocked).toContain('Dry-run');
+      expect((await stackFor(f.gh, f.api.pr)).blocked).toBe('正在等待stack建立');
     },
   );
   it('reconciles duplicate jobs after a cold start with one status receipt per PR', async () => {
@@ -358,7 +358,7 @@ describe('idempotent native Stack management and recovery', () => {
     const count = f.api.stackWrites().length;
     await manageStacks(resume(f));
     expect(f.api.stackWrites()).toHaveLength(count);
-    expect((await stackFor(resume(f), f.api.find(80))).blocked).toContain('已有 Stack 由开发者管理');
+    expect((await stackFor(resume(f), f.api.find(80))).blocked).toBe('Stack暂停：监测到已有手动Stack');
     expect(f.api.find(80).base.ref).toBe('dev');
   });
   it.each(['base', 'unstack', 'membership'])('preserves a developer change to %s', async (mode) => {
@@ -389,7 +389,7 @@ describe('idempotent native Stack management and recovery', () => {
       f.api.stackError = status;
       await manageStacks(f.gh);
       await refreshPR(f.gh, 72);
-      expect(f.api.pr.body).toContain('GitHub 未接受 Stack 操作');
+      expect(f.api.pr.body).toContain('Stack失败：github未接受');
       expect(f.api.comments).toHaveLength(2);
       f.api.stackError = 0;
       await manageStacks(resume(f));
@@ -453,7 +453,9 @@ describe('idempotent native Stack management and recovery', () => {
     await manageStacks(resume(f));
     expect(f.api.stackWrites()).toHaveLength(1);
     expect(f.api.find(74).base.ref).toBe('dev');
-    expect((await stackFor(resume(f), f.api.find(74))).blocked).toContain('已暂停');
+    expect((await stackFor(resume(f), f.api.find(74))).blocked).toBe(
+      '已管理的 Stack 被修改，已暂停自动操作，可通过 stack.enabled关闭自动管理',
+    );
   });
   it('ignores only Piper Base-change echoes when recovering a prepared chain', async () => {
     const f = context();

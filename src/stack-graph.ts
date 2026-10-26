@@ -66,7 +66,7 @@ async function relation(gh: GitHub, base: string, head: string) {
     (c.status === 'diverged' &&
       !(c.ahead_by > 0 && c.behind_by > 0 && c.merge_base_commit.sha !== base && c.merge_base_commit.sha !== head))
   )
-    throw new Denied('GitHub Compare 返回了不一致的祖先关系。');
+    throw new Denied('Stack失败：Compare 祖先信息不一致');
   return c;
 }
 export const memberNumbers = (stack: NativeStack) => stack.pull_requests.map((p) => p.number);
@@ -93,9 +93,8 @@ export const graphSnapshot = (graph: DependencyGraph, members: number[]) =>
 export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
   const open = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', { state: 'open' }, undefined, true);
   const candidates = open.filter((pr) => stackCandidate(gh, pr));
-  if (candidates.length > MAX_STACK_PRS)
-    throw new Denied(`待核验 PR 超过 ${MAX_STACK_PRS} 条，已暂停自动 Stack；请维护者缩小待处理范围。`);
-  if (new Set(open.map((p) => p.number)).size !== open.length) throw new Denied('PR 列表不完整或重复。');
+  if (candidates.length > MAX_STACK_PRS) throw new Denied(`Stack暂停：待核验 PR 超过 ${MAX_STACK_PRS} 条`);
+  if (new Set(open.map((p) => p.number)).size !== open.length) throw new Denied('Stack暂停：PR 列表不完整或重复');
   const prs = new Map(candidates.map((pr) => [pr.number, pr]));
   const graph: DependencyGraph = {
     prs,
@@ -111,14 +110,14 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
     stacks = z.array(nativeStackSchema).parse(await gh.list('GET /repos/{owner}/{repo}/stacks', {}, undefined, true));
   } catch (e) {
     if ([403, 404].includes(statusCode(e)))
-      throw new Denied('无法读取 GitHub 原生 Stack。请维护者确认仓库支持 Stack 且 App 具备 Pull requests 读取权限。', {
+      throw new Denied('Stack失败：无法读取github Stack', {
         cause: e,
       });
     throw e;
   }
   for (const stack of stacks)
     for (const n of memberNumbers(stack)) {
-      if (graph.native.has(n)) throw new Denied('同一 PR 出现在多个 Stack 中。');
+      if (graph.native.has(n)) throw new Denied('Stack暂停：PR 属于多个 Stack');
       graph.native.set(n, stack);
     }
   const links = new Map(candidates.map((p) => [p.number, new Set<number>()]));
@@ -146,19 +145,16 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
   for (const pr of candidates) {
     const target = targetFor(pr);
     if (target) graph.targets.set(pr.number, target);
-    else graph.problems.set(pr.number, '无法唯一确认最终目标分支。请维护者检查 PR 的 Base 和下层 PR 状态。');
+    else graph.problems.set(pr.number, 'Stack暂停：最终目标分支不明确');
     for (const parent of branches.get(pr.base.ref) ?? []) connect(pr.number, parent.number);
-    if ((branches.get(pr.head.ref)?.length ?? 0) > 1)
-      graph.problems.set(pr.number, '同一源分支对应多个 PR，无法唯一确认依赖。请维护者检查重复 PR。');
-    if (pr.stack != null && !graph.native.has(pr.number))
-      graph.problems.set(pr.number, 'GitHub 尚未返回完整 Stack。请等待 Stack 状态更新。');
+    if ((branches.get(pr.head.ref)?.length ?? 0) > 1) graph.problems.set(pr.number, 'Stack暂停：同一分支存在多个 PR');
+    if (pr.stack != null && !graph.native.has(pr.number)) graph.problems.set(pr.number, '正在等待Stack同步');
     try {
       const ref = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/' + pr.head.ref });
-      if (ref.object.sha !== pr.head.sha)
-        graph.problems.set(pr.number, '源分支与 PR 的 HEAD 尚未同步，等待 GitHub 更新后重新核验。');
+      if (ref.object.sha !== pr.head.sha) graph.problems.set(pr.number, '正在等待HEAD同步');
     } catch (e) {
       if (retryRead(e)) throw e;
-      graph.problems.set(pr.number, '源分支已删除或无法读取，已暂停自动 Stack。请维护者检查分支和 App 权限。');
+      graph.problems.set(pr.number, 'Stack暂停：源分支已删除或无法读取');
     }
   }
   for (const stack of stacks) {
@@ -176,10 +172,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
         member.head.ref !== pr.head.ref ||
         pr.base.ref !== (index ? active[index - 1]!.head.ref : stack.base.ref)
       )
-        graph.problems.set(
-          pr.number,
-          'Stack 正在更新，或下层 PR 已关闭、分支已改变。请等待 GitHub Restack；失败时由维护者检查 Stack。',
-        );
+        graph.problems.set(pr.number, 'Stack暂停：状态未同步或下层 PR 已关闭');
     }
   }
   const groups = new Map<string, PR[]>();
@@ -202,8 +195,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
       }
     } catch (e) {
       if (retryRead(e)) throw e;
-      for (const pr of members)
-        graph.problems.set(pr.number, '无法核实目标分支或提交历史。请维护者检查分支是否存在及 App 读取权限。');
+      for (const pr of members) graph.problems.set(pr.number, 'Stack失败：目标分支或提交历史不可读');
     }
     for (let i = 0; i < members.length; i++)
       for (let j = i + 1; j < members.length; j++) {
@@ -214,8 +206,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
             r = compared.status;
           if (r === 'identical') {
             connect(a.number, b.number);
-            for (const pr of [a, b])
-              graph.problems.set(pr.number, '多个 PR 指向同一提交，无法唯一确认依赖。请维护者检查重复 PR。');
+            for (const pr of [a, b]) graph.problems.set(pr.number, 'Stack暂停：多个 PR 指向同一 HEAD');
           } else if (r === 'ahead' && !included.has(a.number)) {
             ancestors.get(b.number)!.add(a.number);
             connect(a.number, b.number);
@@ -226,18 +217,13 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
             const shared = await relation(gh, targetSha, compared.merge_base_commit.sha);
             if (shared.status !== 'behind' && shared.status !== 'identical') {
               connect(a.number, b.number);
-              for (const pr of [a, b])
-                graph.problems.set(
-                  pr.number,
-                  'PR 共享尚未合入目标分支的历史，但当前 HEAD 已分叉。请维护者确认依赖，Piper 已暂停自动 Stack。',
-                );
+              for (const pr of [a, b]) graph.problems.set(pr.number, 'Stack暂停：共享未合入历史，HEAD 已分叉');
             }
           }
         } catch (e) {
           if (retryRead(e)) throw e;
           connect(a.number, b.number);
-          for (const pr of [a, b])
-            graph.problems.set(pr.number, '无法证明唯一的提交祖先关系。请维护者检查 Git 历史和 App 读取权限。');
+          for (const pr of [a, b]) graph.problems.set(pr.number, 'Stack暂停：祖先关系不明确');
         }
       }
   }
@@ -245,21 +231,16 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
     const possible = [...ancestors.get(pr.number)!];
     const nearest = possible.filter((parent) => !possible.some((other) => ancestors.get(other)!.has(parent)));
     if (nearest.length === 1) graph.parents.set(pr.number, nearest[0]!);
-    if (nearest.length > 1)
-      graph.problems.set(pr.number, '存在多个直接父 PR，已暂停自动 Stack。请维护者检查合流历史。');
+    if (nearest.length > 1) graph.problems.set(pr.number, 'Stack暂停：存在多个直接父 PR');
     if (graph.targets.has(pr.number) && pr.base.ref !== graph.targets.get(pr.number)) {
       const parent = graph.parents.get(pr.number);
       if (!parent || prs.get(parent)!.head.ref !== pr.base.ref)
-        graph.problems.set(
-          pr.number,
-          '当前 Base 与已证明的直接父 PR 不一致。请维护者确认分支关系；Piper 会保留当前 Base。',
-        );
+        graph.problems.set(pr.number, 'Stack暂停：Base 与直接父 PR 不一致');
     }
   }
   const children = new Map<number, number[]>();
   for (const [child, parent] of graph.parents) children.set(parent, [...(children.get(parent) ?? []), child]);
-  for (const [parent, rows] of children)
-    if (rows.length > 1) graph.problems.set(parent, '依赖图出现分叉，已暂停自动 Stack。请维护者确认各分支应如何组织。');
+  for (const [parent, rows] of children) if (rows.length > 1) graph.problems.set(parent, 'Stack暂停：依赖图分叉');
   const visited = new Set<number>();
   for (const pr of candidates) {
     if (visited.has(pr.number)) continue;
