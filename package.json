@@ -26,7 +26,7 @@
   },
   "overrides": {
     "@cloudflare/vitest-plugin": { "zod": "4.6.7" },
-    "miniflare": { "undici": "7.30.1" }
+    "undici": "7.30.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261016.1",
