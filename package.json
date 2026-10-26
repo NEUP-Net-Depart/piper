@@ -11,8 +11,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint . --max-warnings 0",
-    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "lint": "biome lint . --error-on-warnings",
+    "format": "biome format . --write",
+    "format:check": "biome format .",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run build",
     "build": "wrangler deploy --dry-run --env production --outdir dist/production",
     "manifest": "node scripts/manifest.mjs"
   },
@@ -25,17 +27,17 @@
     "diff": "^9.0.0"
   },
   "overrides": {
-    "@cloudflare/vitest-plugin": { "zod": "4.6.7" },
+    "@cloudflare/vitest-plugin": {
+      "zod": "4.6.7"
+    },
     "undici": "7.30.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261016.1",
     "@cloudflare/vitest-plugin": "^1.4.3",
-    "@eslint/js": "^10.0.0",
+    "@biomejs/biome": "2.6.3",
     "@types/node": "^22.18.0",
-    "eslint": "^10.0.0",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.0",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.5",
     "wrangler": "^4.152.0"
   }

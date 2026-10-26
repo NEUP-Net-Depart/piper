@@ -18,7 +18,9 @@ npm run verify
 npx wrangler login
 ```
 
-`verify` 执行类型检查、Lint、自动化测试和正式环境打包，不会部署或访问真实 GitHub 仓库。以下命令使用 PowerShell；替换示例中的账号、App ID、登录名和域名后再执行。
+`verify` 执行 TypeScript 类型检查、Biome Lint 与格式检查、自动化测试和正式环境打包，不会部署或访问真实 GitHub 仓库。修改代码后可运行 `npm run format` 统一格式；单独检查用 `npm run lint` 和 `npm run format:check`。以下命令使用 PowerShell；替换示例中的账号、App ID、登录名和域名后再执行。
+
+Biome 按原有 ESLint 规则迁移，保留 TypeScript 中显式 `any` 的用法；使用两空格缩进、单引号和分号。检查覆盖源码、测试、脚本及 JSON / JSONC 配置，跳过依赖、生成产物和锁文件。规则并非完全等价：`no-invalid-regexp`、`no-unexpected-multiline` 和 `triple-slash-reference` 无直接对应规则；格式检查要求显式分号，类型检查仍由 TypeScript 执行。
 
 只需部署一套 `production` 环境：Worker 和任务队列均名为 `piper-production`，失败队列名为 `piper-production-dlq`。公开或私有仓库均可接入。
 

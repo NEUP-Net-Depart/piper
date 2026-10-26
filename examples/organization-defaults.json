@@ -16,16 +16,10 @@
   },
   "merge": {
     "trustedCheckAppIds": [],
-    "requiredChecks": [
-      "verify"
-    ],
+    "requiredChecks": ["verify"],
     "minApprovals": 1,
     "auto": false,
-    "allowedBases": [
-      "dev"
-    ],
-    "protectedBranches": [
-      "main"
-    ]
+    "allowedBases": ["dev"],
+    "protectedBranches": ["main"]
   }
 }
