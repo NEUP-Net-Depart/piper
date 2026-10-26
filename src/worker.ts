@@ -83,7 +83,8 @@ export async function processJob(env: Env, job: Job, api?: Requester): Promise<'
   try {
     if (!allowed(env,job.repo) || !Number.isSafeInteger(job.installation) || job.installation <= 0) throw new Denied('Invalid repository or installation');
     if (stopped(env,job.repo)) return 'retry';
-    gh = new GitHub(env,job.repo,job.id,api ?? installationApi(env,job.installation));
+    // Cron allowlists are lowercased; render the same links for webhook jobs.
+    gh = new GitHub(env,job.repo.toLowerCase(),job.id,api ?? installationApi(env,job.installation));
     gh.useReadCache();
     const repo = await gh.read('GET /repos/{owner}/{repo}');
     if (repo.full_name.toLowerCase() !== job.repo.toLowerCase()) throw new Denied('Repository identity changed');

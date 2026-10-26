@@ -47,7 +47,7 @@ app.post('/webhooks/github', async c => {
   if (typeof repo !== 'string' || !allowed(c.env, repo)) return c.json({ ignored: true }, 202);
   if (!Number.isSafeInteger(installation) || installation <= 0) return c.json({ error: 'installation required' }, 400);
   const time = new Date().toISOString();
-  if (event === 'pull_request' && data.sender?.login === c.env.BOT_LOGIN && data.sender?.type === 'Bot' && ['labeled', 'unlabeled', 'review_requested', 'review_request_removed'].includes(data.action)) return c.json({ ignored: true }, 202);
+  if (event === 'pull_request' && data.sender?.login === c.env.BOT_LOGIN && data.sender?.type === 'Bot' && ['edited', 'labeled', 'unlabeled', 'review_requested', 'review_request_removed'].includes(data.action)) return c.json({ ignored: true }, 202);
   if (event === 'workflow_run' && data.action !== 'completed') return c.json({ ignored: true }, 202);
   if (event === 'check_suite' && data.action !== 'completed') return c.json({ ignored: true }, 202);
   if (event === 'check_run' && data.action === 'requested_action') return c.json({ ignored: true }, 202);

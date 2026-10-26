@@ -9,6 +9,24 @@ const task = (id: string, extra: Partial<Job> = {}): Job => ({ id, repo, install
 const comments = 'GET /repos/{owner}/{repo}/issues/{issue_number}/comments';
 
 describe('shared PR refresh and request cache', () => {
+  it.each(['open', 'closed'] as const)('does not rewrite an unchanged %s PR when Cron and webhooks use different repository casing', async state => {
+    const { env, api } = await fixture();
+    api.pr.state = state;
+    api.pr.merged = state === 'closed';
+    api.pr.merge_commit_sha = state === 'closed' ? 'merge123' : null;
+    api.pr.body = 'Keep the author description.';
+    expect(await processJob(env, task('cron', { repo: repo.toLowerCase() }), api)).toBe('ack');
+    const body = api.pr.body, comments = structuredClone(api.comments);
+    api.calls = [];
+    for (const repository of [repo, repo.toUpperCase(), repo.toLowerCase()]) {
+      expect(await processJob(env, task('webhook:' + repository, { repo: repository }), api)).toBe('ack');
+      expect(api.pr.body).toBe(body);
+      expect(api.comments).toEqual(comments);
+    }
+    expect(api.writes()).toHaveLength(0);
+    expect(env.TASKS.send).not.toHaveBeenCalled();
+  });
+
   it('renders all views together and reads comments, files, reviews and checks once on an unchanged PR', async () => {
     const { env, api } = await fixture();
     expect(await processJob(env, task('initial'), api)).toBe('ack');

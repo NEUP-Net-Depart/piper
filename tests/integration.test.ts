@@ -17,8 +17,8 @@ const jobs = (e: Env): Job[] => (e.TASKS.send as any).mock.calls.map((x: any[]) 
 const fresh = (gh: GitHub, api: FakeGitHub) => { const next = new GitHub(gh.env,gh.repo,gh.job,api); next.config = gh.config; next.commandOrder = gh.commandOrder; return next; };
 
 describe('database-free webhook and Queue ingress', () => {
-  it('ignores Piper label/review echoes and incomplete workflow notifications, preserving human changes', async () => {
-    for (const action of ['labeled', 'unlabeled', 'review_requested', 'review_request_removed']) {
+  it('ignores Piper description/label/review echoes and incomplete workflow notifications, preserving human changes', async () => {
+    for (const action of ['edited', 'labeled', 'unlabeled', 'review_requested', 'review_request_removed']) {
       const e = testEnv(); const payload = { ...event(), action, sender: { login: e.BOT_LOGIN, type: 'Bot' } };
       expect((await webhook(JSON.stringify(payload), e)).status).toBe(202); expect(jobs(e)).toHaveLength(0);
       payload.sender = { login: 'alice', type: 'User' };
@@ -27,6 +27,15 @@ describe('database-free webhook and Queue ingress', () => {
     const e = testEnv();
     await webhook(JSON.stringify({ ...event(), action: 'in_progress' }), e, 'workflow_run'); expect(jobs(e)).toHaveLength(0);
     await webhook(JSON.stringify({ ...event(), action: 'completed', workflow_run: { pull_requests: [{ number: 1 }] } }), e, 'workflow_run'); expect(jobs(e)).toHaveLength(1);
+  });
+  it('still handles other Bot edits and Piper PR lifecycle events', async () => {
+    const e = testEnv();
+    await webhook(JSON.stringify({ ...event(), action: 'edited', sender: { login: 'other[bot]', type: 'Bot' } }), e);
+    for (const action of ['opened', 'closed', 'reopened', 'synchronize']) {
+      await webhook(JSON.stringify({ ...event(), action, sender: { login: e.BOT_LOGIN, type: 'Bot' } }), e);
+    }
+    expect(jobs(e)).toHaveLength(5);
+    expect(jobs(e).every(j => j.kind === 'reconcile' && j.number === 1)).toBe(true);
   });
   it('skips unrelated CI jobs after loading the repository configuration', async () => {
     const e = testEnv(), api = new FakeGitHub();
