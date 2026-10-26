@@ -115,11 +115,26 @@ export class FakeGitHub implements Requester {
         },
       };
     }
-    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}') return { data: this.pullResponse(this.pr, args) };
-    if (route === 'GET /repos/{owner}/{repo}/stacks') return { data: structuredClone(this.stacks) };
+    if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}')
+      return {
+        data: this.pullResponse([this.pr, ...this.prs].find((p) => p.number === args.pull_number) ?? this.pr, args),
+      };
+    if (route === 'GET /repos/{owner}/{repo}/stacks')
+      return {
+        data: structuredClone(
+          this.stacks.filter(
+            (s) => !args.pull_request || s.pull_requests.some((p: PR) => p.number === args.pull_request),
+          ),
+        ),
+      };
     if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') {
-      this.pr.body = args.body;
-      return { data: this.pullResponse(this.pr, args) };
+      const pr = [this.pr, ...this.prs].find((p) => p.number === args.pull_number) ?? this.pr;
+      if (typeof args.body === 'string') pr.body = args.body;
+      if (typeof args.base === 'string') {
+        pr.base.ref = args.base;
+        pr.base.sha = [this.pr, ...this.prs].find((p) => p.head.ref === args.base)?.head.sha ?? 'base123';
+      }
+      return { data: this.pullResponse(pr, args) };
     }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files') return { data: this.files };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews') return { data: this.reviews };

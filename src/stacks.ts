@@ -1,34 +1,23 @@
 import { z } from 'zod';
 import type { GitHub } from './github';
-import { Denied, type PR } from './types';
+import { Denied, type PR, type Progress } from './types';
+import { nativeStackSchema } from './stack-graph';
+import { dependencyFor } from './stack-management';
 
 const summary = z.object({
-  base: z.object({ ref: z.string().min(1), sha: z.string().min(1) }),
+  base: z.object({ ref: z.string().min(1), sha: z.string().min(1).nullable() }),
   id: z.number().int().positive().optional(),
   number: z.number().int().positive().optional(),
   size: z.number().int().positive().optional(),
   position: z.number().int().positive().optional(),
-});
-const stack = z.object({
-  id: z.number().int().positive(),
-  number: z.number().int().positive(),
-  base: z.object({ ref: z.string().min(1) }),
-  pull_requests: z
-    .array(
-      z.object({
-        number: z.number().int().positive(),
-        state: z.enum(['open', 'closed']),
-        merged_at: z.string().nullable(),
-        head: z.object({ ref: z.string().min(1), sha: z.string().min(1) }),
-      }),
-    )
-    .min(1),
 });
 export interface StackInfo {
   target: string;
   fingerprint: string;
   detail?: string;
   waiting: number[];
+  blocked?: string;
+  owner?: Progress['owner'];
 }
 
 export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
@@ -37,13 +26,22 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
     fingerprint: JSON.stringify([pr.head.sha, pr.head.ref, pr.base.ref, pr.base.sha, pr.base.repo.full_name]),
     waiting: [],
   };
-  if (pr.stack == null) return ordinary;
   try {
+    const dependency = await dependencyFor(gh, pr);
+    if (dependency?.blocked) return dependency;
+    if (pr.stack == null) {
+      if (
+        dependency &&
+        (await gh.list('GET /repos/{owner}/{repo}/stacks', { pull_request: pr.number }, undefined, true)).length
+      )
+        throw new Error('Stack summary is being updated');
+      return dependency ?? ordinary;
+    }
     const hint = summary.parse(pr.stack);
     // Never infer ancestry from branch names. The official list is ordered bottom to top.
     const rows = await gh.list('GET /repos/{owner}/{repo}/stacks', { pull_request: pr.number }, undefined, true);
     if (rows.length !== 1) throw new Error('Expected one stack');
-    const current = stack.parse(rows[0]),
+    const current = nativeStackSchema.parse(rows[0]),
       members = current.pull_requests;
     const index = members.findIndex((p) => p.number === pr.number),
       member = members[index];
@@ -72,11 +70,12 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
       target: current.base.ref,
       waiting,
       detail: `Stack #${current.number} · 位置 ${index + 1}/${members.length} · 最终目标 ${current.base.ref} · 直接父分支 ${pr.base.ref}`,
-      fingerprint: JSON.stringify([ordinary.fingerprint, hint, current]),
+      fingerprint: JSON.stringify([ordinary.fingerprint, hint, current, dependency?.fingerprint]),
     };
   } catch (e) {
     gh.audit('stack', 'unverified', { number: pr.number, message: e instanceof Error ? e.message : 'Invalid stack' });
-    throw new Denied('无法可靠核实 Stack 状态。请等待 GitHub 更新 Stack 后重试；Piper 不会合并本次请求。', {
+    if (e instanceof Denied) throw e;
+    throw new Denied('Stack暂停：状态无法核实', {
       cause: e,
     });
   }

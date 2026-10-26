@@ -1,5 +1,6 @@
 import { matches } from './config';
 import { stackFor } from './stacks';
+import { manageStacks } from './stack-management';
 import { mergeFeedback, submitMerge, trackMerge } from './merging';
 import { commitMessage, integratedMessage } from './commits';
 import { GitHub } from './github';
@@ -160,14 +161,25 @@ export async function gate(
     try {
       stack = await stackFor(gh, pr);
       if (stack.detail) {
+        if (stack.blocked) reasons.push(stack.blocked);
         if (stack.waiting.length) reasons.push(`请先合并下层 PR：${stack.waiting.map((n) => '#' + n).join('、')}。`);
         progress.push({
           name: 'Stack 依赖',
-          ready: !stack.waiting.length,
-          detail:
-            stack.detail +
-            (stack.waiting.length ? `；等待下层 ${stack.waiting.map((n) => '#' + n).join('、')}` : '；可独立集成'),
-          owner: '等待',
+          ready: !stack.waiting.length && !stack.blocked,
+          detail: [
+            stack.detail,
+            stack.blocked,
+            stack.waiting.length
+              ? `等待下层 ${stack.waiting.map((n) => '#' + n).join('、')}`
+              : !stack.blocked
+                ? '可独立集成'
+                : undefined,
+          ]
+            .filter((text): text is string => !!text)
+            .map((text) => text.replace(/[。；]+$/, ''))
+            .join('；'),
+          owner: stack.owner ?? '等待',
+          action: stack.owner === '维护者' ? stack.blocked : undefined,
         });
       }
     } catch (e) {
@@ -355,7 +367,10 @@ export async function integrate(
   automatic = false,
   policyAuto = false,
 ) {
-  return gh.fresh(() => integrateCurrent(gh, number, actor, expected, automatic, policyAuto));
+  return gh.fresh(async () => {
+    await manageStacks(gh);
+    return integrateCurrent(gh, number, actor, expected, automatic, policyAuto);
+  });
 }
 async function integrateCurrent(
   gh: GitHub,
@@ -435,8 +450,8 @@ async function integrateCurrent(
       if (current.base.ref !== pr.base.ref)
         throw new Denied('Target branch changed during integration；请重新核实目标分支。');
       const latest = await stackFor(gh, current);
-      if (latest.fingerprint !== snapshot.fingerprint || latest.waiting.length)
-        throw new Denied('Stack、HEAD 或目标分支已改变，请等待 GitHub 更新并重新完成 CI 和审查。');
+      if (latest.fingerprint !== snapshot.fingerprint || latest.waiting.length || latest.blocked)
+        throw new Denied('Stack暂停：HEAD、Base 或依赖已变化');
     },
   );
   if (merged && metadata.tag) await tagPR(gh, await getPR(gh, number), metadata.tag);
@@ -734,6 +749,7 @@ export async function refreshPR(gh: GitHub, number: number, track = true) {
 }
 export async function reconcilePR(gh: GitHub, number: number, renderAll = false): Promise<boolean> {
   await trackMerge(gh, number);
+  await manageStacks(gh);
   let pr = await getPR(gh, number);
   await gh.ensureStatus(number);
   if (pr.state !== 'open') {

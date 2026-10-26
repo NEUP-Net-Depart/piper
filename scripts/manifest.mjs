@@ -39,6 +39,8 @@ console.log(
         'status',
         'push',
         'workflow_run',
+        'create',
+        'delete',
       ],
     },
     null,

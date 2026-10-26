@@ -20,8 +20,6 @@ npx wrangler login
 
 `verify` 执行 TypeScript 类型检查、Biome Lint 与格式检查、自动化测试和正式环境打包，不会部署或访问真实 GitHub 仓库。修改代码后可运行 `npm run format` 统一格式；单独检查用 `npm run lint` 和 `npm run format:check`。以下命令使用 PowerShell；替换示例中的账号、App ID、登录名和域名后再执行。
 
-Biome 按原有 ESLint 规则迁移，保留 TypeScript 中显式 `any` 的用法；使用两空格缩进、单引号和分号。检查覆盖源码、测试、脚本及 JSON / JSONC 配置，跳过依赖、生成产物和锁文件。规则并非完全等价：`no-invalid-regexp`、`no-unexpected-multiline` 和 `triple-slash-reference` 无直接对应规则；格式检查要求显式分号，类型检查仍由 TypeScript 执行。
-
 只需部署一套 `production` 环境：Worker 和任务队列均名为 `piper-production`，失败队列名为 `piper-production-dlq`。公开或私有仓库均可接入。
 
 ### 2. 创建 GitHub App
@@ -31,7 +29,7 @@ Biome 按原有 ESLint 规则迁移，保留 TypeScript 中显式 `any` 的用�
 - Homepage URL：Piper 仓库地址。
 - Webhook URL：对应 Worker 的 `https://你的域名/webhooks/github`。首次部署和密钥配置完成后再启用 Webhook。
 - Repository permissions：按下表授权。
-- Subscribe to events：`pull_request`、`pull_request_review`、`issue_comment`、`issues`、`check_run`、`check_suite`、`status`、`push`、`workflow_run`。
+- Subscribe to events：`pull_request`、`pull_request_review`、`issue_comment`、`issues`、`check_run`、`check_suite`、`status`、`push`、`workflow_run`、`create`、`delete`。已有 App 启用自动 Stack 时也需补选分支创建和删除事件。
 - 安装时选择需要管理的仓库，并让安装范围与后面的仓库白名单一致。
 
 | Repository permission | 级别 |
@@ -146,6 +144,10 @@ Piper 读取每个仓库**默认分支根目录**的 `.piper.yml`。PR 自己修
 enabled: true
 dryRun: true
 
+stack:
+  enabled: false
+  dryRun: true
+
 welcome:
   issue: '感谢反馈。请按 Issue 模板补充问题信息。'
   pr: ''
@@ -206,6 +208,8 @@ release:
 | --- | --- |
 | `enabled` | 默认 `false`；开启该仓库的 Piper 处理 |
 | `dryRun` | 默认 `true`；只记录拟执行操作 |
+| `stack.enabled` | 默认 `false`；自动发现依赖，创建或追加原生 Stack |
+| `stack.dryRun` | 默认 `true`；预演 Stack 管理，仅记录拟执行操作 |
 | `welcome.issue` / `pr` / `merged` | 首次 Issue 回复、PR 状态补充说明、普通 PR 合并致谢；内置中文文案，可设空字符串关闭相应文字，单项最多 10,000 字符 |
 | `welcome.image` | 默认关闭；接受 Worker 的 `/assets/文件名` 或 HTTPS 图片地址，空字符串关闭图片；`merged` 为空时也不展示图片 |
 | `welcome.guide` | 参与指南 URL；内置值为预约系统 Issue #39，接入其他项目时应覆盖 |
@@ -239,11 +243,21 @@ release:
 
 异步结果通过已保存的 UUID 查询，以 `merged` 结果的 `details.sha` 核验最终提交。PR 读取及现有发布流程固定使用 `2022-11-28` 契约，保留其依赖的 `merge_commit_sha` 字段；Stack 和异步合并接口使用 `2026-03-10`。成功后在原回执中展示提交、感谢文案及配置的庆祝图片。
 
-GitHub 原生 Stack 按最终目标分支检查 `allowedBases`，保留直接父分支及下层依赖信息。Piper 只集成当前没有未合并下层依赖的一条 PR；例如 #72 → #74 必须先集成 #72，等待 GitHub 更新 #74 的父分支和 HEAD，再重新完成 CI、当前提交审查及集成。提交前重查 HEAD、Stack 成员和顺序；无法核实则停止。Piper 不创建、调整、Rebase 或整组合并 Stack，也不管理 Merge Queue。
-
 合并意图、UUID 和最终结果保存在 Bot 评论回执中，延迟 Queue 任务查询进度，Cron/状态刷新可恢复丢失的轮询。临时查询故障最多连续重试五次。提交响应丢失时只观察 PR，不盲目重新发起请求；UUID 过期、超过 24 小时或结果无法可靠确认时停止并提示维护者核实。GitHub 不提供 Stack 版本锁，最后一次核验与 GitHub 执行之间仍可能发生外部变更；受理后 Piper 无法撤回该请求。
 
 已有 UUID 的请求若曾记录为结果不确定，后续状态对账在 PR 已合并时会再次只读核验；超过保留期则核验 PR 的实际 HEAD、目标和合并提交。确认成功后追加确认回执并修正原评论，保留历史记录，不重新提交合并请求。
+
+### 自动 Stack
+
+在默认分支的 `.piper.yml` 设置 `stack.enabled: true`，先通过 `stack.dryRun: true` 查看 Worker 日志。正式使用时，将 `stack.dryRun`、仓库 `dryRun` 和 Worker `DRY_RUN` 均设为 `false`。
+
+Piper 从 Git 历史识别同仓库、相同最终目标的唯一线性依赖，排除 Fork 和发布 PR。例如 #74 包含 #72 的 HEAD，且两者都向 `dev` 提交时，Piper 将 #74 的 Base 调整为 #72 的源分支，再建立[GitHub 原生 Stack](https://docs.github.com/en/rest/pulls/stacks?apiVersion=2026-03-10)。Progress 显示 `#72 → #74`，建立完成前暂停集成。
+
+每次最多核验 20 条候选 PR；超限、依赖不明确、分叉或冲突时暂停，并在 Progress 展示原因。已有手动 Stack 保持原状；Piper 只向自己管理的 Stack 顶部追加 PR。人工修改 Base 或 Stack 后暂停自动操作，关闭 `stack.enabled` 可手动接管。
+
+Stack 按最终目标检查 `merge.allowedBases`，每次只集成没有未合并下层依赖的一条 PR。下层 Squash 后由 [GitHub 自动 Restack](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-stacked-pull-requests)；Piper 等待 HEAD、Base 和 Stack 同步，再核验新提交的 CI、人工批准及分支规则。Piper 不执行 Rebase、整组合并或管理 Merge Queue。
+
+操作复用现有 Progress 和 Bot 回执，失败后由事件、队列重试和每小时 Cron 持续对账。写入前后重新核验，发现外部变更即暂停后续步骤。
 
 ### 标签与模块审查规则
 
