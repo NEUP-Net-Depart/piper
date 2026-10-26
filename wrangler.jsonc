@@ -3,18 +3,14 @@
   "name": "piper",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
+  "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true
   },
   "migrations": [
     {
       "tag": "v1-task-coordinator",
-      "new_sqlite_classes": [
-        "TaskCoordinator"
-      ]
+      "new_sqlite_classes": ["TaskCoordinator"]
     }
   ],
   "env": {
@@ -58,9 +54,7 @@
         ]
       },
       "triggers": {
-        "crons": [
-          "0 * * * *"
-        ]
+        "crons": ["0 * * * *"]
       }
     }
   },

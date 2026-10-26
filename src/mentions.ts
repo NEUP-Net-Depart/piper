@@ -16,5 +16,7 @@ export function addressUser(user: User, body: string) {
   if (user.type !== 'User') return body;
   const recipient = userReference(user, true);
   const prefix = body.slice(0, recipient.length + 1).toLowerCase();
-  return prefix === recipient.toLowerCase() + ' ' || prefix === recipient.toLowerCase() + '\n' ? body : recipient + '\n\n' + body;
+  return prefix === recipient.toLowerCase() + ' ' || prefix === recipient.toLowerCase() + '\n'
+    ? body
+    : recipient + '\n\n' + body;
 }

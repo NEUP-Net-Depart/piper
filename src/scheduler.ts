@@ -11,7 +11,11 @@ function group(job: Job) {
 function merge(previous: Job, next: Job): Job {
   return {
     ...next,
-    kind: views.has(next.kind) ? previous.kind === 'reconcile' || next.kind === 'reconcile' ? 'reconcile' : 'status' : next.kind,
+    kind: views.has(next.kind)
+      ? previous.kind === 'reconcile' || next.kind === 'reconcile'
+        ? 'reconcile'
+        : 'status'
+      : next.kind,
     time: Date.parse(previous.time) > Date.parse(next.time) ? previous.time : next.time,
     checkName: previous.checkName === next.checkName ? next.checkName : undefined,
     head: previous.head === next.head ? next.head : undefined,
@@ -20,8 +24,9 @@ function merge(previous: Job, next: Job): Job {
     baseChanged: previous.baseChanged || next.baseChanged,
     configChanged: previous.configChanged || next.configChanged,
     includeClosed: previous.includeClosed || next.includeClosed,
-    closedSince: previous.closedSince && next.closedSince ? [previous.closedSince, next.closedSince].sort()[0] : undefined,
-    syncOnly: previous.syncOnly === true && next.syncOnly === true
+    closedSince:
+      previous.closedSince && next.closedSince ? [previous.closedSince, next.closedSince].sort()[0] : undefined,
+    syncOnly: previous.syncOnly === true && next.syncOnly === true,
   };
 }
 
@@ -30,27 +35,53 @@ function merge(previous: Job, next: Job): Job {
 export class JobScheduler {
   private running = false;
   private readonly pending: { job: Job; repositoryOnly: boolean; resolve: ((result: JobResult) => void)[] }[] = [];
-  constructor(private readonly run: (job: Job, repositoryOnly: boolean) => Promise<JobResult>, private readonly coalesced?: (previous: Job, next: Job) => void) {}
+  constructor(
+    private readonly run: (job: Job, repositoryOnly: boolean) => Promise<JobResult>,
+    private readonly coalesced?: (previous: Job, next: Job) => void,
+  ) {}
   submit(job: Job, repositoryOnly = false): Promise<JobResult> {
-    return new Promise(resolve => {
-      const last = this.pending.at(-1), key = group(job);
-      if (last && key && group(last.job) === key && last.repositoryOnly === repositoryOnly && last.job.installation === job.installation && last.job.repo.toLowerCase() === job.repo.toLowerCase() && last.job.number === job.number && last.resolve.length < 128) {
+    return new Promise((resolve) => {
+      const last = this.pending.at(-1),
+        key = group(job);
+      if (
+        last &&
+        key &&
+        group(last.job) === key &&
+        last.repositoryOnly === repositoryOnly &&
+        last.job.installation === job.installation &&
+        last.job.repo.toLowerCase() === job.repo.toLowerCase() &&
+        last.job.number === job.number &&
+        last.resolve.length < 128
+      ) {
         this.coalesced?.(last.job, job);
-        last.job = merge(last.job, job); last.resolve.push(resolve);
+        last.job = merge(last.job, job);
+        last.resolve.push(resolve);
       } else {
-        if (this.pending.length >= 64) { resolve('retry'); return; }
+        if (this.pending.length >= 64) {
+          resolve('retry');
+          return;
+        }
         this.pending.push({ job, repositoryOnly, resolve: [resolve] });
       }
-      if (!this.running) { this.running = true; void Promise.resolve().then(() => this.drain()); }
+      if (!this.running) {
+        this.running = true;
+        void Promise.resolve().then(() => this.drain());
+      }
     });
   }
   private async drain() {
     for (;;) {
       const item = this.pending.shift();
-      if (!item) { this.running = false; return; }
+      if (!item) {
+        this.running = false;
+        return;
+      }
       let result: JobResult;
-      try { result = await this.run(item.job, item.repositoryOnly); }
-      catch { result = 'retry'; }
+      try {
+        result = await this.run(item.job, item.repositoryOnly);
+      } catch {
+        result = 'retry';
+      }
       for (const resolve of item.resolve) resolve(result);
     }
   }
