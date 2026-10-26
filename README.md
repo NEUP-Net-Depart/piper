@@ -20,8 +20,6 @@ npx wrangler login
 
 `verify` 执行 TypeScript 类型检查、Biome Lint 与格式检查、自动化测试和正式环境打包，不会部署或访问真实 GitHub 仓库。修改代码后可运行 `npm run format` 统一格式；单独检查用 `npm run lint` 和 `npm run format:check`。以下命令使用 PowerShell；替换示例中的账号、App ID、登录名和域名后再执行。
 
-Biome 按原有 ESLint 规则迁移，保留 TypeScript 中显式 `any` 的用法；使用两空格缩进、单引号和分号。检查覆盖源码、测试、脚本及 JSON / JSONC 配置，跳过依赖、生成产物和锁文件。规则并非完全等价：`no-invalid-regexp`、`no-unexpected-multiline` 和 `triple-slash-reference` 无直接对应规则；格式检查要求显式分号，类型检查仍由 TypeScript 执行。
-
 只需部署一套 `production` 环境：Worker 和任务队列均名为 `piper-production`，失败队列名为 `piper-production-dlq`。公开或私有仓库均可接入。
 
 ### 2. 创建 GitHub App
@@ -210,8 +208,8 @@ release:
 | --- | --- |
 | `enabled` | 默认 `false`；开启该仓库的 Piper 处理 |
 | `dryRun` | 默认 `true`；只记录拟执行操作 |
-| `stack.enabled` | 默认 `false`；开启 Git 历史依赖发现及原生 Stack 自动管理，按仓库启用 |
-| `stack.dryRun` | 默认 `true`；仅记录拟调整的 Base 和拟创建或追加的 Stack；其他 Piper 功能仍按各自配置运行 |
+| `stack.enabled` | 默认 `false`；自动发现依赖，创建或追加原生 Stack |
+| `stack.dryRun` | 默认 `true`；预演 Stack 管理，仅记录拟执行操作 |
 | `welcome.issue` / `pr` / `merged` | 首次 Issue 回复、PR 状态补充说明、普通 PR 合并致谢；内置中文文案，可设空字符串关闭相应文字，单项最多 10,000 字符 |
 | `welcome.image` | 默认关闭；接受 Worker 的 `/assets/文件名` 或 HTTPS 图片地址，空字符串关闭图片；`merged` 为空时也不展示图片 |
 | `welcome.guide` | 参与指南 URL；内置值为预约系统 Issue #39，接入其他项目时应覆盖 |
@@ -245,25 +243,21 @@ release:
 
 异步结果通过已保存的 UUID 查询，以 `merged` 结果的 `details.sha` 核验最终提交。PR 读取及现有发布流程固定使用 `2022-11-28` 契约，保留其依赖的 `merge_commit_sha` 字段；Stack 和异步合并接口使用 `2026-03-10`。成功后在原回执中展示提交、感谢文案及配置的庆祝图片。
 
-GitHub 原生 Stack 按最终目标分支检查 `allowedBases`，保留直接父分支及下层依赖信息。Piper 只集成当前没有未合并下层依赖的一条 PR；例如 #72 → #74 必须先集成 #72，等待 GitHub 更新 #74 的 Base 和 HEAD，再重新完成 CI、当前提交审查及集成。提交前重查 HEAD、Stack 成员、顺序及已发现的依赖；无法核实则停止。Piper 不执行 Git Rebase、整组合并或管理 Merge Queue。
-
 合并意图、UUID 和最终结果保存在 Bot 评论回执中，延迟 Queue 任务查询进度，Cron/状态刷新可恢复丢失的轮询。临时查询故障最多连续重试五次。提交响应丢失时只观察 PR，不盲目重新发起请求；UUID 过期、超过 24 小时或结果无法可靠确认时停止并提示维护者核实。GitHub 不提供 Stack 版本锁，最后一次核验与 GitHub 执行之间仍可能发生外部变更；受理后 Piper 无法撤回该请求。
 
 已有 UUID 的请求若曾记录为结果不确定，后续状态对账在 PR 已合并时会再次只读核验；超过保留期则核验 PR 的实际 HEAD、目标和合并提交。确认成功后追加确认回执并修正原评论，保留历史记录，不重新提交合并请求。
 
 ### 自动 Stack
 
-在默认分支的 `.piper.yml` 设置 `stack.enabled: true`，先保留 `stack.dryRun: true`，通过 Worker 日志检查拟执行的依赖链和 Base 调整。确认后设置 `stack.dryRun: false`；实际写入还要求仓库和 Worker 两层 Dry-run 均已关闭。默认不开启，无需为 PR 手工声明依赖。
+在默认分支的 `.piper.yml` 设置 `stack.enabled: true`，先通过 `stack.dryRun: true` 查看 Worker 日志。正式使用时，将 `stack.dryRun`、仓库 `dryRun` 和 Worker `DRY_RUN` 均设为 `false`。
 
-Piper 对同仓库、相同最终目标的开放 PR，使用固定提交 SHA 调用 GitHub Compare，寻找唯一且最近的祖先 PR。只有能证明为线性链时，才将上层 Base 调整为直接父 PR 的源分支，再按从下到上的顺序创建[GitHub 原生 Stack](https://docs.github.com/en/rest/pulls/stacks?apiVersion=2026-03-10)。例如两条 PR 原先都向 `dev` 提交，且 #74 的历史包含 #72 的 HEAD，会自动把 #74 的 Base 调整为 #72 的源分支；Progress 按下层到上层显示为 `#72 → #74`，最终目标仍为 `dev`。
+Piper 从 Git 历史识别同仓库、相同最终目标的唯一线性依赖，排除 Fork 和发布 PR。例如 #74 包含 #72 的 HEAD，且两者都向 `dev` 提交时，Piper 将 #74 的 Base 调整为 #72 的源分支，再建立[GitHub 原生 Stack](https://docs.github.com/en/rest/pulls/stacks?apiVersion=2026-03-10)。Progress 显示 `#72 → #74`，建立完成前暂停集成。
 
-已发现的依赖在原生 Stack 建立完成前暂停集成，防止下层提前 Squash。独立 PR 保持原有流程；Fork、发布 PR、不同最终目标和已被目标分支包含的提交不参与自动组链。重复 HEAD、分叉、多个直接父 PR、共享未合入历史但 HEAD 已分叉、冲突或不完整证据都会暂停相关链，Progress 展示原因和下一步。单次最多核验 20 条符合候选条件的开放 PR；超过时暂停自动 Stack 和相关集成，避免使用不完整的依赖图。
+每次最多核验 20 条候选 PR；超限、依赖不明确、分叉或冲突时暂停，并在 Progress 展示原因。已有手动 Stack 保持原状；Piper 只向自己管理的 Stack 顶部追加 PR。人工修改 Base 或 Stack 后暂停自动操作，关闭 `stack.enabled` 可手动接管。
 
-创建前先把计划保存到各 PR 原有的 Bot 状态回执中，再逐步调整 Base；每次写入前重查整个依赖图、HEAD、Base、源分支和人工 Base 修改记录。每条队列任务最多执行一次 Base 调整或 Stack 创建/追加，间隔五秒继续下一步，控制 Worker 单次请求量。响应丢失或 Queue 重投时先读取实际结果，已完成的步骤直接跳过。普通新提交若仍能证明同一条依赖链，可重新核验并继续；人工修改过 Base 时暂停，不自动改回。已有开发者创建的 Stack 保持原状；只向 Piper 创建且成员和顺序仍一致的 Stack 顶部追加新 PR，不移除成员、拆分或重排 Stack。
+Stack 按最终目标检查 `merge.allowedBases`，每次只集成没有未合并下层依赖的一条 PR。下层 Squash 后由 [GitHub 自动 Restack](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-stacked-pull-requests)；Piper 等待 HEAD、Base 和 Stack 同步，再核验新提交的 CI、人工批准及分支规则。Piper 不执行 Rebase、整组合并或管理 Merge Queue。
 
-下层 Squash 后的[自动 Restack 由 GitHub 执行](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-stacked-pull-requests)。Piper 等待新的 HEAD、Base 和 Stack 信息一致后，重新检查当前提交的 CI、人工批准和 GitHub 分支规则；旧 HEAD 的批准不能用于新提交。PR 生命周期、分支创建/更新/删除会触发对账，现有每小时 Cron 和管理重扫补偿丢失事件；Stack 管理、PR 回执更新和合并通过同一个仓库 Durable Object 串行执行。
-
-操作失败时保留当前 Base 和恢复回执，后续对账继续核验；GitHub 拒绝创建、分支被删除、下层未合并即关闭或人工改变 Stack 时，Progress 提示维护者核对 GitHub 状态。需要手动接管时可关闭 `stack.enabled`。Stack 状态更新复用原有 Progress 和 Bot 状态评论，不为每次变化新增评论，不引入数据库。GitHub 的 Base 和 Stack 写入接口没有跨 PR 的原子版本锁；Piper 会在写入前后核验，外部操作仍可能发生在最后一次检查与 GitHub 执行之间，发现变化后暂停后续步骤。
+操作复用现有 Progress 和 Bot 回执，失败后由事件、队列重试和每小时 Cron 持续对账。写入前后重新核验，发现外部变更即暂停后续步骤。
 
 ### 标签与模块审查规则
 
