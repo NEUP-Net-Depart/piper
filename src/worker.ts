@@ -18,8 +18,9 @@ export async function installationFor(env: Env, repo: string, api = appApi(env))
   if (!Number.isSafeInteger(response.data.id) || response.data.id <= 0) throw new Denied('Invalid installation ID');
   return response.data.id;
 }
-function affectedPR(pr: PR, job: Job, repo: string) {
+function affectedPR(pr: PR, job: Job, repo: string, stackEnabled = false) {
   if (job.configChanged) return true;
+  if (job.stackChanged && stackEnabled) return true;
   if (job.head && !job.baseChanged) return pr.head.sha === job.head;
   if (job.branch) {
     if (job.baseChanged && pr.base.ref === job.branch) return true;
@@ -104,6 +105,16 @@ async function dispatch(gh: GitHub, job: Job) {
         });
       }
     }
+    if (job.stackChanged && gh.config!.stack.enabled)
+      await gh.env.TASKS.send({
+        id: job.id + ':stack-scan',
+        repo: gh.repo,
+        installation: job.installation,
+        kind: 'scan',
+        time: job.time,
+        syncOnly: true,
+        stackChanged: true,
+      } satisfies Job);
   } else if (job.kind === 'release') {
     if (!gh.config!.release.enabled) return;
     if (!job.syncOnly) await prepareRelease(gh, new Date(job.time));
@@ -126,7 +137,7 @@ async function dispatch(gh: GitHub, job: Job) {
       if (batch.length < 100 || batch.some((p) => Date.parse(p.updated_at) < cutoff)) break;
       if (page === 100) throw new Denied('Recent PR scan limit exceeded');
     }
-    const affected = [...open, ...closed].filter((pr) => affectedPR(pr, job, gh.repo));
+    const affected = [...open, ...closed].filter((pr) => affectedPR(pr, job, gh.repo, gh.config!.stack.enabled));
     for (const pr of affected)
       await gh.env.TASKS.send({
         id: job.id + ':pr:' + pr.number,
@@ -181,6 +192,19 @@ export async function processJob(env: Env, job: Job, api?: Requester): Promise<'
       defaultsHash: await sha256(env.ORG_DEFAULTS),
     });
     await dispatch(gh, job);
+    if (!gh.dryRun)
+      for (const [number, phase] of gh.stackRefreshes)
+        await env.TASKS.send(
+          {
+            id: 'stack-sync:' + phase,
+            repo: gh.repo,
+            installation: job.installation,
+            kind: 'reconcile',
+            number,
+            time: new Date(Date.now() + 5000).toISOString(),
+          },
+          { delaySeconds: 5 },
+        );
     if (!gh.dryRun)
       for (const [number, failures] of gh.mergePolls) {
         const delaySeconds = Math.min(900, 30 * 2 ** failures);

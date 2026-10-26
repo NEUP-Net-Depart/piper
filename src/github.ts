@@ -17,7 +17,7 @@ export type Requester = { request: (route: string, parameters?: any) => Promise<
 // Existing PR, Tag and release consumers use the 2022 contract (merge_commit_sha).
 // Upgrade only the Stack and asynchronous merge endpoints to the new contract.
 const apiVersion = (route: string) =>
-  route.includes('/merge-async') || route.endsWith('/stacks') ? '2026-03-10' : '2022-11-28';
+  route.includes('/merge-async') || /\/stacks(?:\/|$)/.test(route) ? '2026-03-10' : '2022-11-28';
 export class GitHub {
   readonly owner: string;
   readonly name: string;
@@ -28,9 +28,11 @@ export class GitHub {
   commandResult?: string;
   readonly ciStartupRefreshes = new Map<number, { head: string; at: number }>();
   readonly mergePolls = new Map<number, number>();
+  readonly stackRefreshes = new Map<number, string>();
   private cacheEnabled = false;
   private readonly lists = new Map<string, Promise<any[]>>();
   private readonly observedPRs = new Map<number, string>();
+  private readonly comparisons = new Map<string, Promise<any>>();
   readonly requests = { reads: 0, cacheHits: 0, writes: 0 };
   constructor(
     readonly env: Env,
@@ -51,6 +53,17 @@ export class GitHub {
         request: { timeout: 20000 },
       })
     ).data as T;
+  }
+  // Only immutable commit IDs are accepted by callers. Base edits do not invalidate this evidence.
+  compare(base: string, head: string): Promise<any> {
+    const basehead = base + '...' + head;
+    let pending = this.comparisons.get(basehead);
+    if (!pending) {
+      pending = this.read('GET /repos/{owner}/{repo}/compare/{basehead}', { basehead, per_page: 1, page: 1 });
+      this.comparisons.set(basehead, pending);
+      void pending.catch(() => this.comparisons.delete(basehead));
+    }
+    return pending;
   }
   useReadCache() {
     this.cacheEnabled = true;

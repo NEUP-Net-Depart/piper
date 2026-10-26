@@ -194,6 +194,22 @@ describe('database-free webhook and Queue ingress', () => {
     );
     expect(jobs(e)[1]).toMatchObject({ baseChanged: true, configChanged: true });
   });
+  it('queues branch creation, deletion and deleted pushes for Stack recovery, while ignoring tags', async () => {
+    const e = testEnv();
+    for (const kind of ['create', 'delete']) {
+      await webhook(JSON.stringify({ ...event(), ref_type: 'tag', ref: 'v1' }), e, kind);
+      await webhook(JSON.stringify({ ...event(), ref_type: 'branch', ref: 'feat/lower' }), e, kind);
+    }
+    await webhook(
+      JSON.stringify({ ...event(), ref: 'refs/heads/feat/lower', deleted: true, after: '0'.repeat(40) }),
+      e,
+      'push',
+    );
+    expect(jobs(e)).toHaveLength(3);
+    expect(
+      jobs(e).every((j) => j.kind === 'scan' && j.stackChanged && j.baseChanged && j.branch === 'feat/lower'),
+    ).toBe(true);
+  });
   it('marks repository-changing commands for coordination without coalescing their identities', async () => {
     const e = testEnv();
     for (const [id, body] of [
@@ -201,6 +217,7 @@ describe('database-free webhook and Queue ingress', () => {
       [2, '/release prepare'],
       [3, '/backport maintenance'],
       [4, '/tag candidate'],
+      [5, '/integrate'],
     ] as const) {
       await webhook(
         JSON.stringify({
@@ -213,8 +230,8 @@ describe('database-free webhook and Queue ingress', () => {
         'issue_comment',
       );
     }
-    expect(jobs(e).map((j) => j.repository)).toEqual([false, true, true, true]);
-    expect(new Set(jobs(e).map((j) => j.id)).size).toBe(4);
+    expect(jobs(e).map((j) => j.repository)).toEqual([false, true, true, true, true]);
+    expect(new Set(jobs(e).map((j) => j.id)).size).toBe(5);
   });
   it('rejects oversized command text as a client error without enqueueing', async () => {
     const e = testEnv();

@@ -31,6 +31,13 @@ export const configSchema = z
   .object({
     enabled: z.boolean().default(false),
     dryRun: z.boolean().default(true),
+    stack: z
+      .object({
+        enabled: z.boolean().default(false),
+        dryRun: z.boolean().default(true),
+      })
+      .strict()
+      .default({ enabled: false, dryRun: true }),
     welcome: z
       .object({
         issue: text.default(welcomeDefaults.issue),

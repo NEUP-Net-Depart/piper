@@ -19,6 +19,8 @@ const events = new Set([
   'status',
   'push',
   'workflow_run',
+  'create',
+  'delete',
 ]);
 export async function verifySignature(secret: string, body: ArrayBuffer, signature: string): Promise<boolean> {
   if (!secret || !/^sha256=[a-f0-9]{64}$/.test(signature)) return false;
@@ -93,8 +95,9 @@ app.post('/webhooks/github', async (c) => {
   if (event === 'workflow_run' && data.action !== 'completed') return c.json({ ignored: true }, 202);
   if (event === 'check_suite' && data.action !== 'completed') return c.json({ ignored: true }, 202);
   if (event === 'check_run' && data.action === 'requested_action') return c.json({ ignored: true }, 202);
-  if (event === 'push' && (data.deleted || (typeof data.ref === 'string' && !data.ref.startsWith('refs/heads/'))))
+  if (event === 'push' && typeof data.ref === 'string' && !data.ref.startsWith('refs/heads/'))
     return c.json({ ignored: true }, 202);
+  if (['create', 'delete'].includes(event) && data.ref_type !== 'branch') return c.json({ ignored: true }, 202);
   let job: Job = {
     id: `webhook:${await sha256(event + ':' + new TextDecoder().decode(body))}`,
     repo,
@@ -103,6 +106,8 @@ app.post('/webhooks/github', async (c) => {
     time,
   };
   if (event === 'check_run' && typeof data.check_run?.name === 'string') job.checkName = data.check_run.name;
+  if (['create', 'delete'].includes(event))
+    job = { ...job, branch: data.ref, baseChanged: true, stackChanged: true, syncOnly: true };
   if (event === 'status' && typeof data.context === 'string') job.checkName = data.context;
   if (['check_run', 'check_suite', 'workflow_run', 'status', 'push'].includes(event)) {
     const head =
@@ -116,6 +121,7 @@ app.post('/webhooks/github', async (c) => {
     if (typeof data.workflow_run?.path === 'string')
       job.workflow = data.workflow_run.path.split('@')[0]!.split('/').at(-1);
     if (event === 'push') {
+      job.stackChanged = true;
       job.baseChanged = true;
       job.configChanged =
         branch === data.repository.default_branch &&
@@ -151,13 +157,13 @@ app.post('/webhooks/github', async (c) => {
       commentId: data.comment.id,
       bodyHash: await sha256(data.comment.body),
       actor: data.sender.login,
-      repository: ['release', 'backport', 'tag'].includes(command.name),
+      repository: ['release', 'backport', 'tag', 'integrate'].includes(command.name),
     };
   } else if (event === 'issues') {
     if (data.action !== 'opened') return c.json({ ignored: true }, 202);
     job = { ...job, kind: 'welcome', number: data.issue?.number };
   } else if (event === 'pull_request' || event === 'pull_request_review')
-    job = { ...job, kind: 'reconcile', number: data.pull_request?.number };
+    job = { ...job, kind: 'reconcile', number: data.pull_request?.number, stackChanged: event === 'pull_request' };
   if (['command', 'welcome', 'reconcile'].includes(job.kind) && (!Number.isSafeInteger(job.number) || job.number! <= 0))
     return c.json({ error: 'invalid issue number' }, 400);
   if (job.kind === 'command' && (!Number.isSafeInteger(job.commentId) || job.commentId! <= 0))

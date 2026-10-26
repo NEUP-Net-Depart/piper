@@ -160,7 +160,7 @@ describe('resource task coordination', () => {
     expect(coordinatorKey(job('other', 'status', { number: 2 }))).not.toBe(coordinatorKey(job('pr')));
   });
 
-  it('serializes repository-changing commands from different PRs through a shared inner coordinator', async () => {
+  it('serializes repository commands, Stack reconciliation and automatic merges from different PRs', async () => {
     const namespace = (env as unknown as Env).COORDINATORS!;
     const repository = namespace.get(namespace.idFromName(coordinatorKey(job('release'), true)));
     let active = 0,
@@ -183,14 +183,24 @@ describe('resource task coordination', () => {
       await Promise.all([
         coordinate(environment, job('release', 'command', { number: 1001, repository: true })),
         coordinate(environment, job('legacy', 'command', { number: 1002 })),
+        coordinate(environment, job('stack-bottom', 'reconcile', { number: 1003 })),
+        coordinate(environment, job('stack-top', 'reconcile', { number: 1004 })),
+        coordinate(environment, job('legacy-integrate', 'command', { number: 1005, repository: false })),
+        coordinate(environment, job('receipt-refresh', 'status', { number: 1006 })),
+        coordinate(environment, job('metadata', 'command', { number: 1007, repository: false })),
       ]),
-    ).toEqual(['ack', 'ack']);
+    ).toEqual(Array(7).fill('ack'));
     expect(maximum).toBe(1);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(7);
     expect(seen).toEqual(
       expect.arrayContaining([
         { id: 'release', repositoryOnly: true },
         { id: 'legacy', repositoryOnly: true },
+        { id: 'stack-bottom', repositoryOnly: true },
+        { id: 'stack-top', repositoryOnly: true },
+        { id: 'legacy-integrate', repositoryOnly: true },
+        { id: 'receipt-refresh', repositoryOnly: true },
+        { id: 'metadata', repositoryOnly: true },
       ]),
     );
   });

@@ -34,10 +34,17 @@ export interface Job {
   configChanged?: boolean;
   closedSince?: string;
   syncOnly?: boolean;
+  stackChanged?: boolean;
   repository?: boolean;
 }
 export interface PR {
-  stack?: { base: { ref: string; sha: string }; size?: number; position?: number; id?: number; number?: number } | null;
+  stack?: {
+    base: { ref: string; sha: string | null };
+    size?: number;
+    position?: number;
+    id?: number;
+    number?: number;
+  } | null;
   number: number;
   title: string;
   body: string | null;

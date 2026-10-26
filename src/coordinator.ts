@@ -50,9 +50,10 @@ export class TaskCoordinator extends DurableObject<Env> {
       ),
   );
   protected async execute(job: Job, repositoryOnly: boolean): Promise<JobResult> {
-    // Acquire the PR coordinator before the repository coordinator, never reverse.
-    // Old command messages lack the hint and conservatively use both coordinators.
-    if (job.kind === 'command' && job.repository !== false && !repositoryOnly) return coordinate(this.env, job, true);
+    // Stack plans share receipts across PRs. Serialize every job that can update those receipts.
+    // Always acquire the issue coordinator before the repository coordinator, never reverse.
+    if (!repositoryOnly && ['command', 'reconcile', 'status', 'labels', 'notice', 'merge-poll'].includes(job.kind))
+      return coordinate(this.env, job, true);
     return processJob(this.env, job);
   }
   async fetch(request: Request) {

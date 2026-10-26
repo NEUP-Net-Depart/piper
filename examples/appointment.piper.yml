@@ -1,6 +1,9 @@
 # 预约系统默认分支 dev 的 .piper.yml。
 enabled: true
 dryRun: true
+stack:
+  enabled: false # 按仓库启用自动依赖发现和原生 Stack 管理。
+  dryRun: true # 检查日志后设为 false；仓库和 Worker 的 Dry-run 也须关闭。
 welcome:
   issue: 感谢反馈。请按 Issue 模板补充问题信息。新功能和新 UI 请先在 issue 中讨论；Bug 修复可以直接提交 PR。
   pr: 普通贡献向 dev 提交；main 为生产分支。修改代码后，继续推送到当前分支。

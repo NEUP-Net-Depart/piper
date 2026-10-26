@@ -23,6 +23,7 @@ function merge(previous: Job, next: Job): Job {
     workflow: previous.workflow === next.workflow ? next.workflow : undefined,
     baseChanged: previous.baseChanged || next.baseChanged,
     configChanged: previous.configChanged || next.configChanged,
+    stackChanged: previous.stackChanged || next.stackChanged,
     includeClosed: previous.includeClosed || next.includeClosed,
     closedSince:
       previous.closedSince && next.closedSince ? [previous.closedSince, next.closedSince].sort()[0] : undefined,
