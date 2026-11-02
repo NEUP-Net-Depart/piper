@@ -100,7 +100,14 @@ function identity(value: string): Identity {
   if (!m) throw new Denied('身份格式应为 Name <email>，且不得包含换行。添加贡献者也可使用 /contributor add @login。');
   return { name: m[1]!.trim(), email: m[2]! };
 }
-export async function executeCommand(gh: GitHub, number: number, actor: string, command: Command, isPR: boolean) {
+export async function executeCommand(
+  gh: GitHub,
+  number: number,
+  actor: string,
+  command: Command,
+  isPR: boolean,
+  deferIntegration = false,
+) {
   gh.actor = actor;
   const { name, args } = command;
   gh.commandName = name;
@@ -189,6 +196,7 @@ export async function executeCommand(gh: GitHub, number: number, actor: string, 
       }
       await save({ kind: 'integrate', cancelled: false, mode: args === 'auto' ? 'auto' : 'manual' });
       await reply('命令已接收，正在核验当前提交、CI、人工批准与 Stack 依赖。');
+      if (deferIntegration) return;
       const intent = await prState(gh, pr);
       if (gh.dryRun || (intent.integrate_head === pr.head.sha && intent.integrate_actor === actor))
         await integrate(gh, number, actor, pr.head.sha);

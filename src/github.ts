@@ -31,6 +31,7 @@ export class GitHub {
   readonly stackRefreshes = new Map<number, string>();
   private cacheEnabled = false;
   private readonly lists = new Map<string, Promise<any[]>>();
+  private readonly sharedReads = new Map<string, Promise<unknown>>();
   private readonly observedPRs = new Map<number, string>();
   private readonly comparisons = new Map<string, Promise<any>>();
   readonly requests = { reads: 0, cacheHits: 0, writes: 0 };
@@ -70,6 +71,20 @@ export class GitHub {
   }
   clearReadCache() {
     this.lists.clear();
+    this.sharedReads.clear();
+  }
+  sharedRead<T>(key: string, run: () => Promise<T>): Promise<T> {
+    if (!this.cacheEnabled) return run();
+    let pending = this.sharedReads.get(key) as Promise<T> | undefined;
+    if (pending) this.requests.cacheHits++;
+    else {
+      pending = run();
+      this.sharedReads.set(key, pending);
+      void pending.catch(() => {
+        if (this.sharedReads.get(key) === pending) this.sharedReads.delete(key);
+      });
+    }
+    return pending;
   }
   observePR(pr: PR) {
     const revision = JSON.stringify([pr.head.sha, pr.base.sha, pr.base.ref, pr.state, pr.merged]);
@@ -79,7 +94,9 @@ export class GitHub {
   }
   async fresh<T>(run: () => Promise<T>): Promise<T> {
     const enabled = this.cacheEnabled;
-    this.cacheEnabled = false;
+    // Start a new observation phase, but share reads within it. Disabling the cache
+    // here made integration repeatedly fetch the same recovery comments and CI.
+    this.cacheEnabled = true;
     this.clearReadCache();
     try {
       return await run();

@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import type { GitHub } from './github';
 import { Denied, type PR, type Progress } from './types';
-import { nativeStackSchema } from './stack-graph';
+import { nativeStackSchema, retryableStackRead } from './stack-graph';
 import { dependencyFor } from './stack-management';
+
+class StackStateError extends Error {}
 
 const summary = z.object({
   base: z.object({ ref: z.string().min(1), sha: z.string().min(1).nullable() }),
@@ -18,6 +20,7 @@ export interface StackInfo {
   waiting: number[];
   blocked?: string;
   owner?: Progress['owner'];
+  hasNativeStack?: boolean;
 }
 
 export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
@@ -30,17 +33,13 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
     const dependency = await dependencyFor(gh, pr);
     if (dependency?.blocked) return dependency;
     if (pr.stack == null) {
-      if (
-        dependency &&
-        (await gh.list('GET /repos/{owner}/{repo}/stacks', { pull_request: pr.number }, undefined, true)).length
-      )
-        throw new Error('Stack summary is being updated');
+      if (dependency?.hasNativeStack) throw new StackStateError('Stack summary is being updated');
       return dependency ?? ordinary;
     }
     const hint = summary.parse(pr.stack);
     // Never infer ancestry from branch names. The official list is ordered bottom to top.
     const rows = await gh.list('GET /repos/{owner}/{repo}/stacks', { pull_request: pr.number }, undefined, true);
-    if (rows.length !== 1) throw new Error('Expected one stack');
+    if (rows.length !== 1) throw new StackStateError('Expected one stack');
     const current = nativeStackSchema.parse(rows[0]),
       members = current.pull_requests;
     const index = members.findIndex((p) => p.number === pr.number),
@@ -59,13 +58,13 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
       pr.head.repo?.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
       pr.base.repo.full_name.toLowerCase() !== gh.repo.toLowerCase()
     )
-      throw new Error('Inconsistent stack');
+      throw new StackStateError('Inconsistent stack');
     const waiting = members
       .slice(0, index)
       .filter((p) => !p.merged_at)
       .map((p) => p.number);
     const parent = waiting.length ? members[index - 1]!.head.ref : current.base.ref;
-    if (pr.base.ref !== parent) throw new Error('Stack is being updated');
+    if (pr.base.ref !== parent) throw new StackStateError('Stack is being updated');
     return {
       target: current.base.ref,
       waiting,
@@ -74,7 +73,7 @@ export async function stackFor(gh: GitHub, pr: PR): Promise<StackInfo> {
     };
   } catch (e) {
     gh.audit('stack', 'unverified', { number: pr.number, message: e instanceof Error ? e.message : 'Invalid stack' });
-    if (e instanceof Denied) throw e;
+    if (e instanceof Denied || (!(e instanceof StackStateError) && retryableStackRead(e))) throw e;
     throw new Denied('Stack暂停：状态无法核实', {
       cause: e,
     });

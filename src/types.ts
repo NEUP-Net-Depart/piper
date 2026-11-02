@@ -20,6 +20,7 @@ export interface Job {
   installation: number;
   kind: 'reconcile' | 'status' | 'notice' | 'labels' | 'scan' | 'release' | 'command' | 'welcome' | 'merge-poll';
   failures?: number;
+  phase?: 'integrate';
   number?: number;
   commentId?: number;
   bodyHash?: string;

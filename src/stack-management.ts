@@ -101,7 +101,7 @@ async function manualBaseEvent(gh: GitHub, number: number) {
 // Called by all merge gates, including direct commands and read-only status refreshes.
 export async function dependencyFor(gh: GitHub, pr: PR): Promise<StackInfo | undefined> {
   if (!gh.config?.stack.enabled || !stackCandidate(gh, pr)) return;
-  const graph = await dependencyGraph(gh),
+  const graph = await dependencyGraph(gh, true),
     members = graphComponent(graph, pr.number);
   const current = graph.prs.get(pr.number);
   if (
@@ -146,6 +146,7 @@ export async function dependencyFor(gh: GitHub, pr: PR): Promise<StackInfo | und
   const index = members.indexOf(pr.number);
   return {
     target,
+    hasNativeStack: !!native,
     blocked,
     owner,
     waiting: members.slice(0, Math.max(0, index)),
@@ -366,7 +367,7 @@ export async function manageStacks(gh: GitHub) {
   if (!gh.config?.stack.enabled || gh.stackRefreshes.size) return;
   let graph: DependencyGraph;
   try {
-    graph = await dependencyGraph(gh);
+    graph = await dependencyGraph(gh, true);
   } catch (e) {
     gh.audit('stack-discovery', 'unverified', { message: e instanceof Error ? e.message : 'Unknown failure' });
     if (!(e instanceof Denied) && !(e instanceof z.ZodError) && ![403, 404, 409, 422].includes(statusCode(e))) throw e;

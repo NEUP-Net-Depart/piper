@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { JobScheduler } from '../src/scheduler';
@@ -25,6 +26,29 @@ function deferred<T = void>() {
 }
 
 describe('resource task coordination', () => {
+  it('executes queued jobs in their own request context instead of sharing the first invocation budget', async () => {
+    const context = new AsyncLocalStorage<string>(),
+      started = deferred(),
+      release = deferred();
+    const seen: { id: string; context: string | undefined }[] = [];
+    const scheduler = new JobScheduler(async (task) => {
+      seen.push({ id: task.id, context: context.getStore() });
+      if (task.id === 'one') {
+        started.resolve();
+        await release.promise;
+      }
+      return 'ack';
+    });
+    const one = context.run('first-request', () => scheduler.submit(job('one', 'command')));
+    await started.promise;
+    const two = context.run('second-request', () => scheduler.submit(job('two', 'command')));
+    release.resolve();
+    expect(await Promise.all([one, two])).toEqual(['ack', 'ack']);
+    expect(seen).toEqual([
+      { id: 'one', context: 'first-request' },
+      { id: 'two', context: 'second-request' },
+    ]);
+  });
   it('serializes across external awaits and coalesces pending checks without crossing command barriers', async () => {
     const started = deferred(),
       release = deferred();

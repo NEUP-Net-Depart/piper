@@ -214,6 +214,19 @@ export async function submitMerge(gh: GitHub, number: number, intent: MergeInten
     await gh.write('integrate:' + intent.key, route, { pull_number: number, ...intent.options }, async () => undefined);
     return false;
   }
+  // Verification has no merge side effect. A transport or runtime failure here
+  // must be retryable even if the invocation cannot write an error receipt.
+  try {
+    await gh.fresh(verify);
+  } catch (e) {
+    gh.audit('merge-preflight', 'failed', { number, message: errorMessage(e) });
+    if (!(e instanceof Denied) && !permanent(e)) throw e;
+    await feedback(gh, number, {
+      intent,
+      result: { status: 'failed', message: errorMessage(e) },
+    });
+    return false;
+  }
   const state: MergeState = { intent };
   // Persist before the side effect. A crash between these steps is ambiguous, never permission to resend.
   await gh.record(number, 'merge-intent:' + intent.key, intent);
@@ -223,10 +236,7 @@ export async function submitMerge(gh: GitHub, number: number, intent: MergeInten
       'integrate:' + intent.key,
       route,
       { pull_number: number, ...intent.options },
-      async () => {
-        await verify();
-        return undefined;
-      },
+      async () => undefined,
       (data, status) => ({ data, status }),
     );
   } catch (e) {

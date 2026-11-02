@@ -62,7 +62,19 @@ async function dispatch(gh: GitHub, job: Job) {
     const issue = await gh.read('GET /repos/{owner}/{repo}/issues/{issue_number}', { issue_number: job.number });
     if (!completed) {
       if (issue.pull_request) await gh.ensureStatus(job.number!);
-      await executeCommand(gh, job.number!, current.user.login, command, !!issue.pull_request);
+      const deferIntegration =
+        !gh.dryRun &&
+        gh.config!.stack.enabled &&
+        command.name === 'integrate' &&
+        ['', 'auto'].includes(command.args) &&
+        job.phase !== 'integrate';
+      await executeCommand(gh, job.number!, current.user.login, command, !!issue.pull_request, deferIntegration);
+      if (deferIntegration) {
+        // Registration and Stack validation need separate invocation budgets. Keep
+        // the verified command identity so redelivery and the continuation dedupe.
+        await gh.env.TASKS.send({ ...job, phase: 'integrate' } satisfies Job);
+        return;
+      }
       await gh.record(
         job.number!,
         'command-done:' + job.id,

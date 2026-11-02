@@ -1,6 +1,12 @@
 import type { Job } from './types';
 
 export type JobResult = 'ack' | 'retry';
+interface PendingJob {
+  job: Job;
+  repositoryOnly: boolean;
+  resolve: ((result: JobResult) => void)[];
+  start: () => void;
+}
 const views = new Set<Job['kind']>(['reconcile', 'status', 'labels', 'notice']);
 function group(job: Job) {
   if (views.has(job.kind)) return 'pr';
@@ -35,7 +41,7 @@ function merge(previous: Job, next: Job): Job {
 // Losing this transient scheduler only causes Queue redelivery, never loss of intent.
 export class JobScheduler {
   private running = false;
-  private readonly pending: { job: Job; repositoryOnly: boolean; resolve: ((result: JobResult) => void)[] }[] = [];
+  private readonly pending: PendingJob[] = [];
   constructor(
     private readonly run: (job: Job, repositoryOnly: boolean) => Promise<JobResult>,
     private readonly coalesced?: (previous: Job, next: Job) => void,
@@ -62,28 +68,39 @@ export class JobScheduler {
           resolve('retry');
           return;
         }
-        this.pending.push({ job, repositoryOnly, resolve: [resolve] });
+        let start!: () => void;
+        const ready = new Promise<void>((resolve) => {
+          start = resolve;
+        });
+        const item = { job, repositoryOnly, resolve: [resolve], start };
+        this.pending.push(item);
+        // Create this continuation in the submitting request's context. A single
+        // drain loop would charge all queued jobs to the first invocation.
+        void this.execute(item, ready);
       }
       if (!this.running) {
         this.running = true;
-        void Promise.resolve().then(() => this.drain());
+        void Promise.resolve().then(() => this.advance());
       }
     });
   }
-  private async drain() {
-    for (;;) {
-      const item = this.pending.shift();
-      if (!item) {
-        this.running = false;
-        return;
-      }
-      let result: JobResult;
-      try {
-        result = await this.run(item.job, item.repositoryOnly);
-      } catch {
-        result = 'retry';
-      }
-      for (const resolve of item.resolve) resolve(result);
+  private advance() {
+    const item = this.pending.shift();
+    if (!item) {
+      this.running = false;
+      return;
     }
+    item.start();
+  }
+  private async execute(item: PendingJob, ready: Promise<void>) {
+    await ready;
+    let result: JobResult;
+    try {
+      result = await this.run(item.job, item.repositoryOnly);
+    } catch {
+      result = 'retry';
+    }
+    for (const resolve of item.resolve) resolve(result);
+    this.advance();
   }
 }

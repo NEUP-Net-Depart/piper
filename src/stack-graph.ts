@@ -52,7 +52,7 @@ const comparison = z.object({
   base_commit: z.object({ sha: z.string().min(1) }),
   merge_base_commit: z.object({ sha: z.string().min(1) }),
 });
-const retryRead = (e: unknown) =>
+export const retryableStackRead = (e: unknown) =>
   statusCode(e) >= 500 ||
   statusCode(e) === 429 ||
   (!statusCode(e) && !(e instanceof Denied) && !(e instanceof z.ZodError));
@@ -79,8 +79,8 @@ export const graphSnapshot = (graph: DependencyGraph, members: number[]) =>
       const target = graph.targets.get(number);
       return [
         number,
-        pr.head,
-        pr.base,
+        [pr.head.sha, pr.head.ref, pr.head.repo?.full_name.toLowerCase()],
+        [pr.base.sha, pr.base.ref, pr.base.repo.full_name.toLowerCase()],
         target,
         target && graph.targetHeads.get(target),
         graph.parents.get(number),
@@ -90,7 +90,10 @@ export const graphSnapshot = (graph: DependencyGraph, members: number[]) =>
   );
 
 // Branch names establish only a possible final target. Compare of immutable SHAs proves every edge.
-export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
+export function dependencyGraph(gh: GitHub, shared = false): Promise<DependencyGraph> {
+  return shared ? gh.sharedRead('stack-graph', () => discoverGraph(gh)) : discoverGraph(gh);
+}
+async function discoverGraph(gh: GitHub): Promise<DependencyGraph> {
   const open = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', { state: 'open' }, undefined, true);
   const candidates = open.filter((pr) => stackCandidate(gh, pr));
   if (candidates.length > MAX_STACK_PRS) throw new Denied(`Stack暂停：待核验 PR 超过 ${MAX_STACK_PRS} 条`);
@@ -153,7 +156,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
       const ref = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/' + pr.head.ref });
       if (ref.object.sha !== pr.head.sha) graph.problems.set(pr.number, '正在等待HEAD同步');
     } catch (e) {
-      if (retryRead(e)) throw e;
+      if (retryableStackRead(e)) throw e;
       graph.problems.set(pr.number, 'Stack暂停：源分支已删除或无法读取');
     }
   }
@@ -194,7 +197,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
         if (r.status === 'behind' || r.status === 'identical') included.add(pr.number);
       }
     } catch (e) {
-      if (retryRead(e)) throw e;
+      if (retryableStackRead(e)) throw e;
       for (const pr of members) graph.problems.set(pr.number, 'Stack失败：目标分支或提交历史不可读');
     }
     for (let i = 0; i < members.length; i++)
@@ -221,7 +224,7 @@ export async function dependencyGraph(gh: GitHub): Promise<DependencyGraph> {
             }
           }
         } catch (e) {
-          if (retryRead(e)) throw e;
+          if (retryableStackRead(e)) throw e;
           connect(a.number, b.number);
           for (const pr of [a, b]) graph.problems.set(pr.number, 'Stack暂停：祖先关系不明确');
         }

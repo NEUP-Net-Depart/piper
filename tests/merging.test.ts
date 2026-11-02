@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GitHub } from '../src/github';
 import { gate, integrate, reconcilePR, refreshPR } from '../src/pulls';
-import { MERGE_RETENTION_MS, trackMerge } from '../src/merging';
+import { MERGE_RETENTION_MS, submitMerge, trackMerge, type MergeIntent } from '../src/merging';
 import { decodeRecords, prState, visibleComment } from '../src/records';
 import { processJob } from '../src/worker';
 import { sha256, type Job } from '../src/types';
@@ -169,6 +169,36 @@ describe('one PR at a time in a native Stack', () => {
 });
 
 describe('durable asynchronous integration', () => {
+  it('retries preflight exhaustion without leaving an ambiguous merge intent', async () => {
+    const f = await fixture();
+    const intent: MergeIntent = {
+      key: 'preflight',
+      at: Date.now(),
+      actor: 'alice',
+      replyJob: 'preflight',
+      target: 'dev',
+      snapshot: '',
+      options: {
+        sha: f.api.pr.head.sha,
+        merge_method: 'squash',
+        merge_action: 'direct_merge',
+        bypass_rules: false,
+        commit_title: f.api.pr.title,
+        commit_message: '',
+      },
+    };
+    const exhausted = new Error('Too many subrequests by single Worker invocation.');
+    await expect(
+      submitMerge(f.gh, 1, intent, async () => {
+        throw exhausted;
+      }),
+    ).rejects.toThrow(exhausted.message);
+    expect((await f.gh.records(1)).some((r) => r.key.startsWith('merge-'))).toBe(false);
+    expect(f.api.calls.filter((c) => c.route === submit)).toHaveLength(0);
+    expect(f.gh.mergePolls.size).toBe(0);
+    expect(await submitMerge(f.gh, 1, intent, async () => undefined)).toBe(true);
+    expect(f.api.calls.filter((c) => c.route === submit)).toHaveLength(1);
+  });
   it.each(['merged', 'enqueued'])('handles an immediate HTTP 200 / %s response', async (status) => {
     const f = await request();
     f.api.extra = async (route) => {

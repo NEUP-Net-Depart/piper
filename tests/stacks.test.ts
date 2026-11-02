@@ -6,7 +6,7 @@ import { manageStacks as manageOnce } from '../src/stack-management';
 import { stackFor } from '../src/stacks';
 import { gate, integrate, refreshPR } from '../src/pulls';
 import { processJob } from '../src/worker';
-import type { Env, PR } from '../src/types';
+import { sha256, type Env, type Job, type PR } from '../src/types';
 import { FakeGitHub, pull, repo, testEnv } from './fixtures';
 
 const readPR = 'GET /repos/{owner}/{repo}/pulls/{pull_number}';
@@ -145,6 +145,29 @@ function context(api = new StackGitHub(), overrides: Partial<Env> = {}) {
   return { gh, api, env };
 }
 const resume = (f: ReturnType<typeof context>) => context(f.api, f.env).gh;
+async function integrateCommand(f: ReturnType<typeof context>, body = '/integrate'): Promise<Job> {
+  const number = f.api.pr.number;
+  f.api.comments.push({
+    id: 99,
+    issue_number: number,
+    body,
+    user: { login: 'alice', type: 'User' },
+    issue_url: `https://api.github.com/repos/${repo}/issues/${number}`,
+  });
+  return {
+    id: 'command:' + repo.toLowerCase() + ':99',
+    repo,
+    installation: 1,
+    kind: 'command',
+    number,
+    actor: 'alice',
+    commentId: 99,
+    bodyHash: await sha256(body),
+    time: new Date().toISOString(),
+  };
+}
+const continuation = (f: ReturnType<typeof context>): Job =>
+  (f.env.TASKS.send as any).mock.calls.map((c: any[]) => c[0]).find((j: Job) => j.phase);
 async function manageStacks(gh: GitHub) {
   for (let round = 0; round <= MAX_STACK_PRS * 2; round++) {
     await manageOnce(gh);
@@ -517,6 +540,94 @@ describe('restack and merge safety', () => {
     };
     expect(await integrate(resume(f), 72, 'alice', 'sha72')).toBe(false);
     expect(f.api.calls.some((c) => c.route === merge)).toBe(false);
+  });
+  it('keeps integration fingerprints compact and independent of unrelated repository metadata', async () => {
+    const f = context(new StackGitHub([stackedPull(72)]));
+    for (const repo of [f.api.pr.head.repo!, f.api.pr.base.repo])
+      Object.assign(repo, { description: 'x'.repeat(20000), open_issues_count: 10 });
+    const before = await stackFor(f.gh, f.api.pr);
+    expect(before.fingerprint.length).toBeLessThan(2000);
+    Object.assign(f.api.pr.head.repo!, { description: 'Changed', open_issues_count: 11 });
+    expect((await stackFor(resume(f), f.api.pr)).fingerprint).toBe(before.fingerprint);
+    expect(await integrate(resume(f), 72, 'alice', 'sha72')).toBe(true);
+  });
+  it.each([1, 2])('accepts a cold integrate command among %i independent PRs within 50 API requests', async (count) => {
+    const rows = Array.from({ length: count }, (_, i) => stackedPull(87 + i));
+    const f = context(new StackGitHub(rows));
+    for (const pr of rows) f.api.parents.set(pr.head.sha, ['base123']);
+    f.api.mergeImmediately = false;
+    const task = await integrateCommand(f);
+    const original = f.api.request.bind(f.api);
+    let requests = 0;
+    f.api.request = async (route, args) => {
+      if (++requests > 50) throw new Error('Too many subrequests by single Worker invocation.');
+      return original(route, args);
+    };
+    expect(await processJob(f.env, task, f.api)).toBe('ack');
+    expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(0);
+    expect(requests).toBeLessThanOrEqual(45);
+    const next = continuation(f);
+    expect(next).toEqual({ ...task, phase: 'integrate' });
+    requests = 0;
+    const before = f.api.calls.length;
+    const result = await processJob(f.env, next, f.api);
+    const calls = f.api.calls.slice(before);
+    const counts = Object.fromEntries(
+      [...new Set(calls.map((c) => c.route))].map((route) => [route, calls.filter((c) => c.route === route).length]),
+    );
+    expect(result, JSON.stringify({ requests, counts })).toBe('ack');
+    expect(requests).toBeLessThanOrEqual(45); // Leave room for App authentication and Queue operations.
+    expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(1);
+    expect(f.api.comments.some((c) => c.body.includes('GitHub 已受理'))).toBe(true);
+  });
+  it.each(['head', 'comment', 'permission'])(
+    'revalidates the command when %s changes between registration and integration',
+    async (change) => {
+      const f = context(new StackGitHub([stackedPull(72)]));
+      const task = await integrateCommand(f, '/integrate auto');
+      expect(await processJob(f.env, task, f.api)).toBe('ack');
+      if (change === 'head') {
+        f.api.pr.head.sha = 'changed';
+        f.api.parents.set('changed', ['base123']);
+        f.api.runs[0].head_sha = 'changed';
+        f.api.reviews[0].commit_id = 'changed';
+      } else if (change === 'comment') f.api.comments.find((c) => c.id === task.commentId).body = '/integrate';
+      else f.api.permissions.alice = 'read';
+      expect(await processJob(f.env, continuation(f), f.api)).toBe('ack');
+      expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(0);
+      expect((await resume(f).records(72)).some((r) => r.key.startsWith('merge-intent:'))).toBe(false);
+    },
+  );
+  it('recovers a lost continuation enqueue response without duplicate merge submissions', async () => {
+    const f = context(new StackGitHub([stackedPull(72)]));
+    f.api.mergeImmediately = false;
+    const task = await integrateCommand(f);
+    (f.env.TASKS.send as any).mockRejectedValueOnce(new Error('Queue response lost'));
+    expect(await processJob(f.env, task, f.api)).toBe('retry');
+    const first = continuation(f);
+    expect(await processJob(f.env, task, f.api)).toBe('ack');
+    expect(await processJob(f.env, first, f.api)).toBe('ack');
+    expect(await processJob(f.env, { ...task, phase: 'integrate' }, f.api)).toBe('ack');
+    expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(1);
+  });
+  it('retries final Stack transport failures before persisting a merge intent', async () => {
+    const f = context(new StackGitHub([stackedPull(72)]));
+    f.api.mergeImmediately = false;
+    const task = await integrateCommand(f);
+    expect(await processJob(f.env, task, f.api)).toBe('ack');
+    let reads = 0,
+      final = false;
+    f.api.before = async (route) => {
+      if (route === readPR && ++reads === 3) final = true;
+      if (route === listPR && final) throw new Error('Too many subrequests by single Worker invocation.');
+    };
+    const next = continuation(f);
+    expect(await processJob(f.env, next, f.api)).toBe('retry');
+    expect((await resume(f).records(72)).some((r) => r.key.startsWith('merge-intent:'))).toBe(false);
+    expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(0);
+    f.api.before = undefined;
+    expect(await processJob(f.env, next, f.api)).toBe('ack');
+    expect(f.api.calls.filter((c) => c.route === merge)).toHaveLength(1);
   });
   it('blocks integration when a native Stack branch has been deleted', async () => {
     const f = context();
