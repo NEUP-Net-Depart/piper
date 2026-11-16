@@ -5,7 +5,7 @@ import { assign, rotate, welcome } from '../src/pulls';
 import { GitHub } from '../src/github';
 import { sha256, type Env, type Job } from '../src/types';
 import { fixture, FakeGitHub, repo, testEnv } from './fixtures';
-import { prepareRelease, publishRelease, releaseFor, syncRelease } from '../src/releases';
+import { prepareRelease, publishRelease, syncRelease } from '../src/releases';
 
 async function webhook(
   body: string,
@@ -247,7 +247,7 @@ describe('database-free webhook and Queue ingress', () => {
   it('discovers installations from the allowlist and scans existing PRs without registration', async () => {
     const e = testEnv(),
       api = new FakeGitHub();
-    await tick(e, new Date(), api);
+    await tick(e, new Date('2026-11-16T00:00:00Z'), api);
     expect(jobs(e)[0]).toMatchObject({ repo: repo.toLowerCase(), installation: 1, kind: 'scan' });
     await processJob(e, jobs(e)[0]!, api);
     expect(jobs(e).some((j) => j.kind === 'reconcile' && j.number === 1)).toBe(true);
@@ -448,62 +448,6 @@ describe('timeline based reviewer lifecycle', () => {
   });
 });
 describe('native release objects', () => {
-  it.each([repo, 'org/project'])(
-    'prepares once, requires approval, waits for exact deployment and publishes once across cold starts in %s',
-    async (repository) => {
-      const { gh: configured, api } = await fixture('release:\n  enabled: true', { ALLOWED_REPOSITORIES: repository });
-      const gh = new GitHub(configured.env, repository, configured.job, api);
-      gh.config = configured.config;
-      gh.commandOrder = configured.commandOrder;
-      api.pr.head.repo = { full_name: repository };
-      api.pr.base.repo = { full_name: repository };
-      const date = new Date('2026-10-15T10:00:00Z');
-      const row = (await prepareRelease(gh, date))!;
-      await prepareRelease(fresh(gh, api), date);
-      expect(row).toMatchObject({ repo: repository, state: 'awaiting_approval' });
-      expect(api.calls.filter((x) => x.route === 'POST /repos/{owner}/{repo}/pulls')).toHaveLength(1);
-      await expect(publishRelease(gh, 1, 'mallory')).rejects.toThrow('维护者权限');
-      api.reviews = [];
-      await expect(publishRelease(gh, 1, 'alice')).rejects.toThrow('人工审查者');
-      api.reviews = [
-        {
-          id: 1,
-          user: { login: 'bob', type: 'User' },
-          state: 'APPROVED',
-          commit_id: 'abc123',
-          submitted_at: new Date().toISOString(),
-        },
-      ];
-      await publishRelease(gh, 1, 'alice');
-      expect(api.calls.find((x) => x.route.endsWith('/merge'))?.args.merge_method).toBe('merge');
-      expect(api.tags.size).toBe(0);
-      api.workflows = [
-        {
-          id: 10,
-          head_sha: 'merge123',
-          head_branch: 'main',
-          event: 'push',
-          status: 'completed',
-          conclusion: 'failure',
-          run_attempt: 1,
-        },
-      ];
-      await syncRelease(fresh(gh, api), row);
-      expect((await releaseFor(gh, api.pr))?.state).toBe('deployment_failed');
-      expect(api.tags.size).toBe(0);
-      api.workflows[0].conclusion = 'success';
-      api.workflows[0].run_attempt = 2;
-      await syncRelease(fresh(gh, api), row);
-      await syncRelease(fresh(gh, api), row);
-      expect(api.tags.get('v0.1.0')).toBe('merge123');
-      expect(api.releases).toHaveLength(1);
-      expect(api.releases[0].body).toContain('alice');
-      expect(api.releases[0]).toMatchObject({ draft: false, prerelease: false, make_latest: 'true' });
-      expect((await releaseFor(gh, api.pr))?.state).toBe('published');
-      const [owner, name] = repository.split('/');
-      for (const call of api.calls) expect(call.args).toMatchObject({ owner, repo: name });
-    },
-  );
   it.each(['', 'release:\n  enabled: false'])(
     'requires releases to be explicitly enabled with configuration %j',
     async (config) => {
@@ -516,6 +460,7 @@ describe('native release objects', () => {
     'blocks preparation, merge and publication after %s revocation',
     async (policy) => {
       const { gh, api } = await fixture('release:\n  enabled: true');
+      gh.actor = 'carol';
       const row = (await prepareRelease(gh, new Date(), true))!;
       if (policy === 'allowlist') gh.env.ALLOWED_REPOSITORIES = 'org/other';
       else gh.config!.release.enabled = false;
@@ -526,4 +471,55 @@ describe('native release objects', () => {
       expect(api.writes()).toHaveLength(writes);
     },
   );
+});
+
+it('routes a signed manual workflow completion to one stable release request, without PR fanout', async () => {
+  const e = testEnv();
+  const payload = {
+    ...event(),
+    action: 'completed',
+    workflow_run: {
+      id: 123,
+      event: 'workflow_dispatch',
+      conclusion: 'success',
+      path: '.github/workflows/release.yml',
+      pull_requests: [{ number: 1 }],
+    },
+  };
+  await webhook(JSON.stringify(payload), e, 'workflow_run');
+  await webhook(JSON.stringify(payload), e, 'workflow_run', undefined, 'redelivery-123456');
+  expect(jobs(e)).toHaveLength(2);
+  expect(jobs(e)[0]).toMatchObject({
+    kind: 'release',
+    releaseRunId: 123,
+    id: `release-request:${repo.toLowerCase()}:123`,
+  });
+  expect(jobs(e)[0]!.number).toBeUndefined();
+  expect(jobs(e)[1]!.id).toBe(jobs(e)[0]!.id);
+});
+
+it('runs release-only reconciliation every five minutes without changing hourly ordinary scans', async () => {
+  const e = testEnv(),
+    api = new FakeGitHub();
+  await tick(e, new Date('2026-11-16T03:05:00Z'), api);
+  expect(jobs(e)).toHaveLength(1);
+  expect(jobs(e)[0]).toMatchObject({ kind: 'release', syncOnly: true });
+  await processJob(e, jobs(e)[0]!, api);
+  expect(api.calls.some((c) => c.route === 'POST /repos/{owner}/{repo}/pulls')).toBe(false);
+  await tick(e, new Date('2026-11-16T04:00:00Z'), api);
+  expect(jobs(e)[1]).toMatchObject({ kind: 'scan', includeClosed: true });
+});
+
+it('does not consume a failed release workflow run as a completed release request', async () => {
+  const e = testEnv();
+  const payload = {
+    ...event(),
+    action: 'completed',
+    workflow_run: { id: 124, event: 'workflow_dispatch', conclusion: 'failure', path: '.github/workflows/release.yml' },
+  };
+  await webhook(JSON.stringify(payload), e, 'workflow_run');
+  expect(jobs(e)[0]!.releaseRunId).toBeUndefined();
+  payload.workflow_run.conclusion = 'success';
+  await webhook(JSON.stringify(payload), e, 'workflow_run');
+  expect(jobs(e)[1]).toMatchObject({ kind: 'release', releaseRunId: 124 });
 });

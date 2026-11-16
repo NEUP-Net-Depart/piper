@@ -11,6 +11,7 @@ const views = new Set<Job['kind']>(['reconcile', 'status', 'labels', 'notice']);
 function group(job: Job) {
   if (views.has(job.kind)) return 'pr';
   if (job.kind === 'scan') return 'scan';
+  if (job.releaseRunId) return undefined;
   if (job.kind === 'release') return job.syncOnly ? 'release-sync' : 'release:' + job.time.slice(0, 10);
   return undefined;
 }

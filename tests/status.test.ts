@@ -1,3 +1,5 @@
+import { prepareRelease } from '../src/releases';
+import { releaseFixture } from './fixtures';
 import { describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config';
 import { GitHub } from '../src/github';
@@ -137,20 +139,20 @@ describe('maintained PR description with a recovery comment', () => {
     expect(api.pr.merged).toBe(false);
   });
 
-  it('shows the release command and distinguishes a merged release PR from a published release', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true\nreviewers:\n  count: 0');
-    api.pr.base.ref = 'main';
-    api.pr.head.ref = 'dev';
-    api.pr.user = { login: gh.env.BOT_LOGIN, type: 'Bot' };
-    api.pr.body = '<!-- piper-release:v1:2026-10-15:v0.1.0:abc123 -->';
+  it('shows release blockers once and a concise merged status', async () => {
+    const { gh, api } = await releaseFixture();
+    await prepareRelease(gh, new Date(), true);
     await reconcilePR(gh, 1);
-    expect(api.pr.body).toContain('Merge Commit');
+    expect(api.pr.body).toContain('等待合并时间');
+    expect(api.pr.body?.match(/等待合并时间/g)).toHaveLength(1);
     expect(api.pr.body).not.toContain('`/integrate`');
     api.pr.state = 'closed';
     api.pr.merged = true;
     api.pr.merged_at = new Date().toISOString();
     await reconcilePR(cold(gh, api, 'merged-release'), 1);
-    expect(api.pr.body).toContain('`/release status`');
+    expect(api.pr.body).toContain('已合并。');
+    expect(api.pr.body).not.toContain('审查详情');
+    expect(api.pr.body).not.toContain('Annotated Tag');
     expect(api.pr.body).not.toContain('发布成功');
   });
 

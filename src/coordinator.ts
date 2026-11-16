@@ -35,6 +35,18 @@ export async function coordinate(env: Env, job: Job, repositoryOnly = false): Pr
   return result.result;
 }
 
+export async function deduplicateReleaseRequest(
+  storage: DurableObjectStorage,
+  job: Job,
+  run: () => Promise<JobResult>,
+): Promise<JobResult> {
+  const key = job.releaseRunId ? 'release-request:' + job.repo.toLowerCase() + ':' + job.releaseRunId : undefined;
+  if (key && (await storage.get(key))) return 'ack';
+  const result = await run();
+  if (key && result === 'ack') await storage.put(key, { completedAt: new Date().toISOString() });
+  return result;
+}
+
 export class TaskCoordinator extends DurableObject<Env> {
   private readonly jobs = new JobScheduler(
     (job, repositoryOnly) => this.execute(job, repositoryOnly),
@@ -54,7 +66,7 @@ export class TaskCoordinator extends DurableObject<Env> {
     // Always acquire the issue coordinator before the repository coordinator, never reverse.
     if (!repositoryOnly && ['command', 'reconcile', 'status', 'labels', 'notice', 'merge-poll'].includes(job.kind))
       return coordinate(this.env, job, true);
-    return processJob(this.env, job);
+    return deduplicateReleaseRequest(this.ctx.storage, job, () => processJob(this.env, job));
   }
   async fetch(request: Request) {
     if (request.method !== 'POST' || new URL(request.url).pathname !== '/jobs')

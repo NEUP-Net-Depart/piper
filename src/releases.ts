@@ -1,9 +1,21 @@
-import { allowed } from './config';
 import { integratedMessage } from './commits';
-import { GitHub } from './github';
-import { gate, getPR } from './pulls';
-import { addressUser } from './mentions';
-import { Denied, Retryable, safeText, statusCode, type PR } from './types';
+import { allowed } from './config';
+import type { GitHub } from './github';
+import { getPR } from './pulls';
+import { notesFor } from './release-notes';
+import {
+  RELEASE_DELAY_MS,
+  RELEASE_LABEL,
+  RELEASE_RECORD,
+  releaseBranches,
+  releaseCancelled,
+  releaseGate,
+  releaseMaintainer,
+  releasePlan,
+  signReleasePlan,
+  type ReleasePlan,
+} from './release-policy';
+import { Denied, Retryable, safeText, sha256, type PR } from './types';
 
 export interface ReleaseRow {
   repo: string;
@@ -12,40 +24,10 @@ export interface ReleaseRow {
   pr_number: number | null;
   source_sha: string;
   merge_sha: string | null;
+  mergeAfter: string;
   state: string;
   notes: string;
   error: string | null;
-}
-export function releaseStatusMessage(gh: GitHub, row: ReleaseRow) {
-  const actions = `https://github.com/${gh.repo}/actions/workflows/${encodeURIComponent(gh.config!.release.deploymentWorkflow)}`;
-  const states: Record<string, [string, string]> = {
-    awaiting_approval: [
-      '等待审查与发布确认',
-      '完成发布 PR 的 CI 和当前提交的人工批准后，由维护者在该 PR 中发送 `/release publish`。',
-    ],
-    awaiting_deployment: [
-      '已合并，等待部署',
-      `等待部署完成，Piper 会自动检查。[查看部署工作流](${actions})；如果没有运行记录，请维护者检查工作流配置。`,
-    ],
-    ready_to_publish: ['部署已通过，等待创建版本', 'Piper 会自动创建版本 Tag 和 Release，无需重复发送发布命令。'],
-    deployment_failed: [
-      '部署未成功',
-      `维护者请[查看部署日志](${actions})，修复并重跑工作流。Piper 会自动重新核验；部署成功前不会创建版本 Tag 和 Release。`,
-    ],
-    published: [
-      '版本已发布',
-      `[查看 Release](https://github.com/${gh.repo}/releases/tag/${encodeURIComponent(row.version)})，无需继续操作。`,
-    ],
-    cancelled: ['发布 PR 已关闭，未合并', '需要继续时，请维护者重新打开该发布 PR，完成最新提交的检查和审查。'],
-  };
-  const [label, action] = states[row.state] ?? ['状态待确认', '请维护者核对发布 PR 和部署工作流。'];
-  const pr = row.pr_number ? ` · [PR #${row.pr_number}](https://github.com/${gh.repo}/pull/${row.pr_number})` : '';
-  return [
-    `**${safeText(row.version)}：${label}**${pr}`,
-    '',
-    action,
-    ...(row.error ? ['', '<details>', '<summary>失败详情</summary>', '', safeText(row.error), '', '</details>'] : []),
-  ].join('\n');
 }
 export function localTime(date: Date, timezone: string) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -64,333 +46,265 @@ export function localTime(date: Date, timezone: string) {
     weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(p.weekday!),
   };
 }
-export function nextVersion(tags: string[], rule: 'patch' | 'minor' | 'date', initial: string, date: string) {
-  if (rule === 'date') return `v${date.split('-').map(Number).join('.')}`;
-  const versions = tags
-    .map((t) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(t))
-    .filter((x) => x !== null)
-    .map((m) => [Number(m[1]), Number(m[2]), Number(m[3])]);
-  versions.sort((a, b) => b[0]! - a[0]! || b[1]! - a[1]! || b[2]! - a[2]!);
-  const v = versions[0];
-  if (!v) return initial;
-  return rule === 'minor' ? `v${v[0]}.${v[1]! + 1}.0` : `v${v[0]}.${v[1]}.${v[2]! + 1}`;
+export function releaseTitle(date: Date) {
+  const [year, month, day] = localTime(date, 'Asia/Shanghai').date.split('-');
+  return `[release] ${year}年${Number(month)}月${Number(day)}日版本发布`;
+}
+export function releaseStatusMessage(gh: GitHub, row: ReleaseRow) {
+  const status: Record<string, string> = {
+    waiting: '等待自动合并。',
+    merged: '已合并。',
+    cancelled: '已取消。',
+  };
+  return [
+    `**${safeText(row.version)}** · [PR #${row.pr_number}](https://github.com/${gh.repo}/pull/${row.pr_number})`,
+    status[row.state] ?? row.state,
+    ...(row.state === 'waiting'
+      ? [
+          `最早合并时间：${new Date(row.mergeAfter).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）。`,
+        ]
+      : []),
+  ].join('\n\n');
 }
 function ensureRelease(gh: GitHub) {
   if (!allowed(gh.env, gh.repo) || !gh.config!.release.enabled)
     throw new Denied('该仓库未启用发布，请维护者检查仓库白名单和 release.enabled 配置');
 }
-function validateReleasePR(gh: GitHub, pr: PR) {
-  const c = gh.config!.release;
-  if (
-    pr.head.repo?.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
-    pr.base.repo.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
-    pr.head.ref !== c.source ||
-    pr.base.ref !== c.target
-  )
-    throw new Denied('发布 PR 来源、目标或仓库不匹配');
-}
-interface ReleasePlan {
-  cycle: string;
-  version: string;
-  source_sha: string;
-}
-function releasePlan(gh: GitHub, pr: PR): ReleasePlan | null {
-  if (pr.user.login !== gh.env.BOT_LOGIN || pr.user.type !== 'Bot') return null;
-  const match = /^<!-- piper-release:v1:(\d{4}-\d{2}-\d{2}):(v\d+\.\d+\.\d+):([a-zA-Z0-9]+) -->/.exec(pr.body ?? '');
-  return match ? { cycle: match[1]!, version: match[2]!, source_sha: match[3]! } : null;
-}
-async function notesFor(gh: GitHub, base: string, head: string) {
-  const commits = await gh.list(
-    'GET /repos/{owner}/{repo}/compare/{basehead}',
-    { basehead: base + '...' + head },
-    'commits',
-  );
-  const changes = commits
-    .map((c) => '- ' + safeText(c.commit.message.split('\n')[0]).slice(0, 250) + ' (' + c.sha.slice(0, 7) + ')')
-    .join('\n');
-  const authors = [...new Set(commits.map((c) => safeText(c.author?.login || c.commit.author.name)))].sort().join(', ');
-  const notes =
-    '## 变更\n\n' +
-    changes +
-    '\n\n## 贡献者\n\n' +
-    authors +
-    '\n\nhttps://github.com/' +
-    gh.repo +
-    '/compare/' +
-    base +
-    '...' +
-    head;
-  if (notes.length > 50000) throw new Denied('Release notes too long; split the release');
-  return notes;
-}
-async function deployment(gh: GitHub, sha: string) {
-  const c = gh.config!.release;
-  const runs = await gh.list(
-    'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
-    { workflow_id: c.deploymentWorkflow, head_sha: sha, branch: c.target, event: 'push' },
-    'workflow_runs',
-  );
-  const run = runs
-    .filter((r) => r.head_sha === sha && r.head_branch === c.target && r.event === 'push')
-    .sort((a, b) => b.id - a.id || b.run_attempt - a.run_attempt)[0];
-  if (!run || run.status !== 'completed') return { run, state: 'awaiting_deployment', error: null };
-  const jobs = await gh.list(
-    'GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs',
-    { run_id: run.id, attempt_number: run.run_attempt },
-    'jobs',
-  );
-  const deploy = jobs.filter((j) => j.name === c.deploymentJob);
-  const success =
-    run.conclusion === 'success' &&
-    deploy.length === 1 &&
-    deploy[0].status === 'completed' &&
-    deploy[0].conclusion === 'success' &&
-    deploy[0].head_sha === sha;
-  return {
-    run,
-    state: success ? 'ready_to_publish' : 'deployment_failed',
-    error: success
-      ? null
-      : 'Workflow ' +
-        run.id +
-        ': ' +
-        (run.conclusion !== 'success' ? run.conclusion : 'Deployment job missing, skipped or unsuccessful'),
-  };
-}
 export async function releaseFor(gh: GitHub, pr: PR): Promise<ReleaseRow | null> {
-  const plan = releasePlan(gh, pr);
+  const plan = await releasePlan(gh, pr);
   if (!plan) return null;
-  validateReleasePR(gh, pr);
-  const row: ReleaseRow = {
+  return {
     repo: gh.repo,
-    ...plan,
+    cycle: plan.request,
+    version: plan.title,
     pr_number: pr.number,
+    source_sha: pr.head.sha,
     merge_sha: pr.merge_commit_sha,
+    mergeAfter: plan.mergeAfter,
     notes: '',
-    state: pr.state === 'closed' ? 'cancelled' : 'awaiting_approval',
     error: null,
+    state: pr.merged ? 'merged' : (await releaseCancelled(gh, pr)) ? 'cancelled' : 'waiting',
   };
-  if (pr.merged && pr.merge_commit_sha) {
-    try {
-      const published = await gh.read('GET /repos/{owner}/{repo}/releases/tags/{tag}', { tag: plan.version });
-      const tag = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'tags/' + plan.version });
-      if (published.draft || published.author?.login !== gh.env.BOT_LOGIN || tag.object.sha !== pr.merge_commit_sha)
-        throw new Denied('Existing release/tag requires manual reconciliation');
-      row.state = 'published';
-    } catch (e) {
-      if (statusCode(e) !== 404) throw e;
-      const info = await deployment(gh, pr.merge_commit_sha);
-      row.state = info.state;
-      row.error = info.error;
-    }
-  }
-  return row;
 }
-export async function listReleases(gh: GitHub): Promise<ReleaseRow[]> {
-  const c = gh.config!.release;
+export async function listReleases(gh: GitHub, openOnly = false): Promise<ReleaseRow[]> {
   const prs = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', {
-    state: 'all',
-    head: gh.owner + ':' + c.source,
-    base: c.target,
+    state: openOnly ? 'open' : 'all',
+    head: gh.owner + ':dev',
+    base: 'main',
     sort: 'created',
     direction: 'desc',
   });
   const rows: ReleaseRow[] = [];
-  for (const item of prs) {
-    if (!releasePlan(gh, item)) continue;
-    const row = await releaseFor(gh, await getPR(gh, item.number));
+  for (const pr of prs) {
+    const row = await releaseFor(gh, await getPR(gh, pr.number));
     if (row) rows.push(row);
   }
   return rows;
 }
-export async function prepareRelease(gh: GitHub, date: Date, force = false): Promise<ReleaseRow | null> {
-  ensureRelease(gh);
-  const c = gh.config!.release,
-    time = localTime(date, c.timezone);
-  if (!force && (time.weekday !== c.weekday || time.hour < c.hour)) return null;
-  const rows = await listReleases(gh);
-  const existing = rows.find((r) => r.cycle === time.date || !['published', 'cancelled'].includes(r.state));
-  if (existing) {
-    if (existing.pr_number && existing.state === 'awaiting_approval')
-      await gh.setLabels(existing.pr_number, ['release'], 'release-label:' + existing.cycle);
-    return existing;
-  }
-  const source = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/' + c.source });
-  const target = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/' + c.target });
-  const comparison = await gh.read('GET /repos/{owner}/{repo}/compare/{basehead}', {
-    basehead: target.object.sha + '...' + source.object.sha,
-    per_page: 100,
-  });
-  if (comparison.ahead_by === 0) return null;
-  if (!['ahead', 'diverged'].includes(comparison.status)) throw new Denied('Release comparison is not ahead');
-  const tags = await gh.list('GET /repos/{owner}/{repo}/tags');
-  const version = nextVersion(
-    [...tags.map((t) => t.name), ...rows.map((r) => r.version)],
-    c.version,
-    c.initialVersion,
-    time.date,
-  );
-  if (tags.some((t) => t.name === version) || rows.some((r) => r.version === version))
-    throw new Denied('Release version already reserved');
-  const notes = await notesFor(gh, target.object.sha, source.object.sha);
-  const marker = '<!-- piper-release:v1:' + time.date + ':' + version + ':' + source.object.sha + ' -->';
-  const body =
-    marker +
-    '\n' +
-    notes +
-    '\n\n发布需要当前提交的人工批准。维护者使用 /release publish 请求 Merge Commit，部署成功后创建 Tag 和 Release。';
-  const pr = await gh.write(
-    'release-pr:' + time.date,
-    'POST /repos/{owner}/{repo}/pulls',
-    { title: 'Release ' + version, head: c.source, base: c.target, body },
-    async () => {
-      const prs = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', {
-        state: 'all',
-        head: gh.owner + ':' + c.source,
-        base: c.target,
-      });
-      const recovered = prs.find((p) => releasePlan(gh, p)?.cycle === time.date);
-      if (!recovered && prs.some((p) => p.state === 'open')) throw new Denied('已有相同分支的发布 PR，请先处理');
-      return recovered;
-    },
-  );
-  if (!pr) return null;
-  await gh.setLabels(pr.number, ['release'], 'release-label:' + time.date);
-  return releaseFor(gh, await getPR(gh, pr.number));
-}
-export async function publishRelease(gh: GitHub, number: number, actor: string) {
-  return gh.fresh(() => publishCurrentRelease(gh, number, actor));
-}
-async function publishCurrentRelease(gh: GitHub, number: number, actor: string) {
-  ensureRelease(gh);
-  if (!(await gh.maintainer(actor))) throw new Denied('发布需要维护者权限');
-  const pr = await getPR(gh, number),
-    row = await releaseFor(gh, pr);
-  if (!row) throw new Denied('这不是 Piper 创建的发布 PR');
-  if (pr.merged && pr.merge_commit_sha) {
-    const approval = await gh.getRecord<{ job?: string }>(number, 'release-approval:' + pr.head.sha);
-    gh.commandResult =
-      approval?.job === gh.job
-        ? integratedMessage(gh, pr)
-        : `此 PR 已合并。[查看提交](https://github.com/${gh.repo}/commit/${pr.merge_commit_sha})。`;
-  }
-  if (row.state === 'published') return;
-  if (pr.merged) {
-    await syncRelease(gh, row);
+async function updateRelease(gh: GitHub, pr: PR, plan: ReleasePlan) {
+  const progress = pr.body?.indexOf('\n\n<!-- piper:progress -->') ?? -1;
+  const prefix = progress >= 0 ? pr.body!.slice(0, progress) : (pr.body ?? '');
+  const key = 'release-notes:v3:' + pr.base.sha + ':' + pr.head.sha;
+  const cached = await gh.getRecord<{ digest: string }>(pr.number, key);
+  if (cached?.digest === (await sha256(prefix)) && pr.title === plan.title) return;
+  const notes = await notesFor(gh, pr.base.sha, pr.head.sha);
+  const body = `<!-- piper-release:v2 -->\n${notes}\n\n最早合并时间：${new Date(plan.mergeAfter).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）。\n关闭 PR 或移除 \`${RELEASE_LABEL}\` 可取消。`;
+  const fullBody = body + (progress >= 0 ? pr.body!.slice(progress) : '');
+  if (pr.body === fullBody && pr.title === plan.title) {
+    await gh.record(pr.number, key, { digest: await sha256(body) });
     return;
   }
-  const result = await gate(gh, pr, true);
-  if (!result.ready) throw new Denied('发布尚未满足条件：' + result.reasons.join('；'));
-  await gh.record(number, 'release-approval:' + pr.head.sha, {
-    head: pr.head.sha,
-    actor,
-    reviewers: result.reviewers,
-    version: row.version,
-    job: gh.job,
+  await gh.write(
+    'release-notes:' + pr.number,
+    'PATCH /repos/{owner}/{repo}/pulls/{pull_number}',
+    { pull_number: pr.number, title: plan.title, body: fullBody },
+    async () => {
+      const current = await getPR(gh, pr.number);
+      if (
+        current.state !== 'open' ||
+        current.head.sha !== pr.head.sha ||
+        current.base.sha !== pr.base.sha ||
+        !releaseBranches(gh, current)
+      )
+        throw new Retryable('发布 PR 在更新说明时发生变化');
+      if (current.body === fullBody && current.title === plan.title) return current;
+      if (current.body !== pr.body) throw new Retryable('发布说明已变化');
+      return undefined;
+    },
+  );
+  await gh.record(pr.number, key, { digest: await sha256(body) });
+}
+// Only explicit, authenticated commands/dispatches call this with force=true.
+// Cron is reconciliation only and must never create a release.
+export async function prepareRelease(gh: GitHub, _date: Date, force = false): Promise<ReleaseRow | null> {
+  ensureRelease(gh);
+  if (!force) return null;
+  if (!(await releaseMaintainer(gh, gh.actor))) throw new Denied('发布入口需要 maintain / admin 维护者权限');
+  const requestMarker = `<!-- piper-release-request:${await sha256(gh.job)} -->`;
+  const prs = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', {
+    state: 'all',
+    head: gh.owner + ':dev',
+    base: 'main',
+    sort: 'created',
+    direction: 'desc',
   });
+  // Persist request IDs on the PR, including reused PRs. Replaying an old request
+  // after merge/close must not create a new release with newer dev commits.
+  for (const item of prs) {
+    if (
+      item.state === 'closed' &&
+      item.user.login === gh.env.BOT_LOGIN &&
+      item.user.type === 'Bot' &&
+      item.body?.includes(requestMarker)
+    )
+      return releaseFor(gh, await getPR(gh, item.number));
+    if (await gh.getRecord(item.number, 'release-request:' + gh.job)) {
+      const current = await getPR(gh, item.number);
+      const plan = await releasePlan(gh, current);
+      if (plan && current.state === 'open') await updateRelease(gh, current, plan);
+      return releaseFor(gh, current);
+    }
+    const plan = await releasePlan(gh, item);
+    if (plan?.request === gh.job && item.state !== 'open') return releaseFor(gh, await getPR(gh, item.number));
+  }
+  let pr = prs.find((p) => p.state === 'open');
+  if (pr && (pr.user.login !== gh.env.BOT_LOGIN || pr.user.type !== 'Bot' || pr.draft))
+    throw new Denied('已有非 Piper 正式发布 PR，拒绝重复创建或自动接管');
+  if (!pr) {
+    const source = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/dev' });
+    const target = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'heads/main' });
+    const comparison = await gh.compare(target.object.sha, source.object.sha);
+    if (comparison.ahead_by === 0) return null;
+    if (!['ahead', 'diverged'].includes(comparison.status)) throw new Denied('main...dev 没有可发布比较结果');
+    pr =
+      (await gh.write(
+        'release-create:' + gh.job,
+        'POST /repos/{owner}/{repo}/pulls',
+        {
+          title: releaseTitle(new Date()),
+          head: 'dev',
+          base: 'main',
+          draft: false,
+          body: '<!-- piper-release:v2 -->\n' + requestMarker + '\n正在整理发布说明。',
+        },
+        async () => {
+          const open = await gh.list<PR>(
+            'GET /repos/{owner}/{repo}/pulls',
+            { state: 'open', head: gh.owner + ':dev', base: 'main' },
+            undefined,
+            true,
+          );
+          if (open.length) throw new Retryable('已有 dev → main PR，重新核验后复用');
+          return undefined;
+        },
+      )) ?? undefined;
+    if (!pr) return null;
+  }
+  pr = await getPR(gh, pr.number);
+  let plan = await releasePlan(gh, pr);
+  if (!plan) {
+    if (!pr.created_at || !Number.isFinite(Date.parse(pr.created_at))) throw new Denied('GitHub 缺少 PR 创建时间');
+    plan = {
+      createdAt: pr.created_at,
+      mergeAfter: new Date(Date.parse(pr.created_at) + RELEASE_DELAY_MS).toISOString(),
+      title: releaseTitle(new Date(pr.created_at)),
+      request: gh.job,
+      signature: '',
+    };
+    plan.signature = await signReleasePlan(gh, pr.number, plan);
+    // Save before labeling. A lost label write is recovered only for this initial
+    // request; a historical removal/close is permanently recorded as cancellation.
+    await gh.record(pr.number, RELEASE_RECORD, plan);
+  }
+  if (!(await gh.getRecord(pr.number, 'release-armed:v2'))) {
+    const history = await gh.list('GET /repos/{owner}/{repo}/issues/{issue_number}/timeline', {
+      issue_number: pr.number,
+    });
+    if (history.some((e) => e.event === 'closed' || (e.event === 'unlabeled' && e.label?.name === RELEASE_LABEL)))
+      await gh.record(pr.number, 'release-cancelled:v2', { at: new Date().toISOString() });
+    else await gh.setLabels(pr.number, ['release', RELEASE_LABEL], 'release-label:' + pr.number);
+    await gh.record(pr.number, 'release-armed:v2', { at: new Date().toISOString() });
+  }
+  await gh.record(pr.number, 'release-request:' + gh.job, { actor: gh.actor });
+  await updateRelease(gh, await getPR(gh, pr.number), plan);
+  return releaseFor(gh, await getPR(gh, pr.number));
+}
+export async function requestRelease(gh: GitHub, runId: number) {
+  ensureRelease(gh);
+  const run = await gh.read('GET /repos/{owner}/{repo}/actions/runs/{run_id}', { run_id: runId });
+  const repo = await gh.read('GET /repos/{owner}/{repo}');
+  if (run.status !== 'completed' || run.conclusion !== 'success')
+    throw new Retryable('发布入口正在重跑或未成功，等待成功结果');
+  if (
+    run.event !== 'workflow_dispatch' ||
+    run.path !== '.github/workflows/' + gh.config!.release.requestWorkflow ||
+    run.head_branch !== repo.default_branch ||
+    run.head_repository?.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
+    run.repository?.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
+    run.actor?.type !== 'User' ||
+    run.triggering_actor?.type !== 'User' ||
+    !(await releaseMaintainer(gh, run.actor.login)) ||
+    !(await releaseMaintainer(gh, run.triggering_actor.login))
+  )
+    throw new Denied('发布请求必须来自默认分支的维护者 workflow_dispatch');
+  gh.actor = run.triggering_actor.login;
+  return prepareRelease(gh, new Date(run.created_at), true);
+}
+async function mergeRelease(gh: GitHub, number: number, manual = false) {
+  ensureRelease(gh);
+  const pr = await getPR(gh, number);
+  const plan = await releasePlan(gh, pr);
+  if (!plan) throw new Denied('这不是 Piper 登记的发布 PR');
+  if (pr.merged) {
+    gh.commandResult = '已合并。';
+    return;
+  }
+  const gate = await releaseGate(gh, pr, !manual);
+  if (!gate.ready) {
+    if (manual) throw new Denied('发布尚未满足条件：' + gate.reasons.join('；'));
+    return;
+  }
+  if (manual)
+    await gh.record(pr.number, 'release-approval:' + pr.head.sha, { head: pr.head.sha, actor: gh.actor, job: gh.job });
   const merged = await gh.write(
-    'release-merge:' + row.cycle + ':' + pr.head.sha,
+    'release-merge:' + number + ':' + pr.head.sha,
     'PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge',
     {
       pull_number: number,
       merge_method: 'merge',
       sha: pr.head.sha,
-      commit_title: 'Release ' + row.version + ' (#' + number + ')',
-      commit_message: 'Reviewed-by: ' + result.reviewers.join(', '),
+      commit_title: plan.title,
+      commit_message: '',
     },
     async () => {
       const current = await getPR(gh, number);
-      validateReleasePR(gh, current);
-      if (current.head.sha !== pr.head.sha) throw new Retryable('Release head changed before merge');
-      return current.merged && current.head.sha === pr.head.sha
-        ? { merged: true, sha: current.merge_commit_sha }
-        : undefined;
+      if (current.merged) return { merged: true, sha: current.merge_commit_sha };
+      if (current.head.sha !== pr.head.sha || current.base.sha !== pr.base.sha || !releaseBranches(gh, current))
+        throw new Retryable('Release HEAD 或 Base 已更新，重新核验后再合并');
+      // Repeat uncached verification immediately before the write, including cancellation.
+      const latest = await releaseGate(gh, current, !manual);
+      if (!latest.ready) throw new Retryable(latest.reasons.join('；'));
+      return undefined;
     },
   );
+  if (merged && !merged.merged) throw new Retryable('GitHub 暂未允许发布合并，将自动重试');
   if (merged?.merged) gh.commandResult = integratedMessage(gh, pr, merged.sha);
-  if (merged && !merged.merged) throw new Retryable('GitHub refused release merge');
-  if (merged?.merged) await syncRelease(gh, row);
+}
+export async function publishRelease(gh: GitHub, number: number, actor: string) {
+  ensureRelease(gh);
+  if (!(await releaseMaintainer(gh, actor))) throw new Denied('提前发布需要 maintain / admin 维护者权限');
+  gh.actor = actor;
+  return gh.fresh(() => mergeRelease(gh, number, true));
 }
 export async function syncRelease(gh: GitHub, row: ReleaseRow) {
-  return gh.fresh(() => syncCurrentRelease(gh, row));
-}
-async function syncCurrentRelease(gh: GitHub, row: ReleaseRow) {
   ensureRelease(gh);
-  if (!row.pr_number) return;
-  const pr = await getPR(gh, row.pr_number),
-    current = await releaseFor(gh, pr);
-  if (!current || !pr.merged || !pr.merge_commit_sha || current.state === 'published') return;
-  const commit = await gh.read('GET /repos/{owner}/{repo}/git/commits/{commit_sha}', {
-    commit_sha: pr.merge_commit_sha,
+  return gh.fresh(async () => {
+    if (!row.pr_number) return;
+    const pr = await getPR(gh, row.pr_number);
+    const plan = await releasePlan(gh, pr);
+    if (!plan || pr.state !== 'open') return;
+    await updateRelease(gh, pr, plan);
+    if (!(await gh.getRecord(pr.number, 'release-armed:v2'))) return; // preparation retry owns arming
+    await mergeRelease(gh, pr.number);
   });
-  if (commit.parents.length !== 2 || commit.parents[1]?.sha !== pr.head.sha)
-    throw new Denied('发布必须使用 Merge Commit，且第二父提交必须匹配 source SHA');
-  const receipt = await gh.getRecord<{ head: string; version: string; actor?: string }>(
-    pr.number,
-    'release-approval:' + pr.head.sha,
-  );
-  if (!receipt) {
-    const approval = await gate(
-      gh,
-      { ...pr, state: 'open', merged: false, mergeable: true, mergeable_state: 'clean' },
-      true,
-    );
-    if (!approval.ready || pr.head.sha !== current.source_sha)
-      throw new Denied('手动合并的发布缺少有效批准、CI 或匹配的 source SHA');
-  } else if (receipt.head !== pr.head.sha || receipt.version !== current.version)
-    throw new Denied('Release approval receipt mismatch');
-  const info = await deployment(gh, pr.merge_commit_sha);
-  if (info.state === 'awaiting_deployment') return;
-  if (info.state === 'deployment_failed') {
-    await gh.comment(
-      pr.number,
-      'release-failed:' + current.cycle + ':' + info.run.id + ':' + info.run.run_attempt,
-      addressUser(
-        receipt?.actor ? { login: receipt.actor, type: 'User' } : pr.user,
-        '发布部署未成功：' + safeText(info.error!) + '。未创建版本 Tag 或 Release。修复并重跑工作流后会继续核验。',
-      ),
-    );
-    return;
-  }
-  const notes = await notesFor(gh, commit.parents[0].sha, pr.head.sha);
-  await gh.write(
-    'release-tag:' + current.version,
-    'POST /repos/{owner}/{repo}/git/refs',
-    { ref: 'refs/tags/' + current.version, sha: pr.merge_commit_sha },
-    async () => {
-      try {
-        const tag = await gh.read('GET /repos/{owner}/{repo}/git/ref/{ref}', { ref: 'tags/' + current.version });
-        if (tag.object.type !== 'commit' || tag.object.sha !== pr.merge_commit_sha)
-          throw new Denied('版本 Tag 已存在且目标不同，拒绝覆盖');
-        return tag;
-      } catch (e) {
-        if (statusCode(e) === 404) return undefined;
-        throw e;
-      }
-    },
-  );
-  await gh.write(
-    'release-publish:' + current.version,
-    'POST /repos/{owner}/{repo}/releases',
-    {
-      tag_name: current.version,
-      target_commitish: pr.merge_commit_sha,
-      name: current.version,
-      body: notes,
-      draft: false,
-      prerelease: false,
-      make_latest: 'true',
-    },
-    async () => {
-      try {
-        const release = await gh.read('GET /repos/{owner}/{repo}/releases/tags/{tag}', { tag: current.version });
-        if (release.draft || release.author?.login !== gh.env.BOT_LOGIN)
-          throw new Denied('Existing release requires manual reconciliation');
-        return release;
-      } catch (e) {
-        if (statusCode(e) === 404) return undefined;
-        throw e;
-      }
-    },
-  );
 }

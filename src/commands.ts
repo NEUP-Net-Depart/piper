@@ -1,3 +1,4 @@
+import { releaseMaintainer } from './release-policy';
 import { backport } from './backport';
 import { GitHub } from './github';
 import { assign, filesFor, gate, getPR, integrate, removeReviewer, tagPR } from './pulls';
@@ -135,11 +136,11 @@ export async function executeCommand(
         rows.length
           ? rows.map((r) => releaseStatusMessage(gh, r)).join('\n\n---\n\n')
           : gh.config!.release.enabled
-            ? '尚无发布记录。需要发布时，请维护者发送 `/release prepare` 创建发布 PR。'
-            : '尚无发布记录，当前仓库未启用 Piper 发布。请维护者确认仓库的发布方式。',
+            ? '尚无发布记录。使用 `/release prepare` 创建。'
+            : '当前仓库未启用发布。',
       );
     } else {
-      await requireMaintainer();
+      if (!(await releaseMaintainer(gh, actor))) throw new Denied('发布入口需要 maintain / admin 维护者权限');
       if (args === 'prepare') {
         const at = new Date().toISOString();
         const plan = await gh.record(number, 'release-prepare:' + gh.job, { at });
@@ -148,7 +149,7 @@ export async function executeCommand(
       } else if (args === 'publish' && isPR) {
         await pinHead((await getPR(gh, number)).head.sha);
         await publishRelease(gh, number, actor);
-        await reply(gh.commandResult ?? '发布请求已核验。部署结果可通过 `/release status` 查询。');
+        await reply(gh.commandResult ?? '发布请求已核验。');
       } else throw new Denied('使用 /release prepare、/release status 或在发布 PR 内使用 /release publish');
     }
     return;
@@ -232,10 +233,7 @@ export async function executeCommand(
         }
         await requireMaintainer();
         const value = Number(args);
-        const floor = Math.max(
-          reviewPolicy(gh.config!, pr, await filesFor(gh, number)).minimum,
-          gh.config!.release.enabled && pr.base.ref === gh.config!.release.target ? gh.config!.release.minApprovals : 1,
-        );
+        const floor = reviewPolicy(gh.config!, pr, await filesFor(gh, number)).minimum;
         if (value < floor || value > 10)
           throw new Denied(`所需批准人数必须为 ${floor}–10，不能低于仓库或模块要求。请使用 /reviewers 数字。`);
         await save({ kind: 'reviewers-count', value });
@@ -355,7 +353,12 @@ export async function executeCommand(
     }
     case 'tag':
       await requireMaintainer();
-      if (!/^[a-zA-Z][\w.-]{0,79}$/.test(args) || /^v\d/.test(args) || args.includes('..') || args.endsWith('.lock'))
+      if (
+        !/^[a-zA-Z][\w.-]{0,79}$/.test(args) ||
+        /^(?:v\d|release-)/.test(args) ||
+        args.includes('..') ||
+        args.endsWith('.lock')
+      )
         throw new Denied(
           '普通 Tag 须为 1 至 80 个字符，以英文字母开头，其余只能使用英文字母、数字、下划线、点和连字符；不能含 ..、以 .lock 结尾或以 v数字开头。版本 Tag 请使用发布流程。',
         );

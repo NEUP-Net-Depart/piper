@@ -13,7 +13,7 @@ const topics: Record<string, { summary: string; syntax: string[]; detail: string
     summary: '将当前 PR 合并到目标分支。作者或维护者可执行。',
     syntax: ['/integrate', '/integrate auto', '/integrate cancel', '/integrate manual'],
     detail:
-      '普通 PR 使用 Squash：把这次 PR 的修改合成一个提交。\n\n- /integrate：立即尝试一次。作者无需仓库写权限；条件未满足时不会排队，完成检查后须重新发送。\n- /integrate auto：等待当前提交的条件满足后自动合并，发令者必须有仓库写权限。\n- /integrate cancel：取消通过命令登记的自动请求；/integrate manual 是同义命令，不会立即合并。\n\n先确认协作状态中的 CI（自动检查）、人工批准和分支规则已满足，再检查集成提示中的最终提交信息。推送新提交会使旧请求和旧批准失效。取消命令请求不会关闭维护者在 .piper.yml 中配置的 merge.auto，也不会撤回 GitHub 已受理的请求。GitHub 受理后会异步更新本条命令回复，无需重复发送。Stack 只逐个集成：先合并下层 PR，等待 GitHub 更新上层分支后重新检查和审查。发布 PR 使用 /release publish。',
+      '普通 PR 使用 Squash：把这次 PR 的修改合成一个提交。\n\n- /integrate：立即尝试一次。作者无需仓库写权限；条件未满足时不会排队，完成检查后须重新发送。\n- /integrate auto：等待当前提交的条件满足后自动合并，发令者必须有仓库写权限。\n- /integrate cancel：取消通过命令登记的自动请求；/integrate manual 是同义命令，不会立即合并。\n\n先确认协作状态中的 CI（自动检查）、人工批准和分支规则已满足，再检查集成提示中的最终提交信息。推送新提交会使旧请求和旧批准失效。取消命令请求不会关闭维护者在 .piper.yml 中配置的 merge.auto，也不会撤回 GitHub 已受理的请求。GitHub 受理后会异步更新本条命令回复，无需重复发送。Stack 只逐个集成：先合并下层 PR，等待 GitHub 更新上层分支后重新检查和审查。发布用法见 /help release。',
   },
   reviewers: {
     summary: '查看审查安排；维护者可邀请或更换审查者。',
@@ -49,7 +49,7 @@ const topics: Record<string, { summary: string; syntax: string[]; detail: string
     summary: '维护者为合并提交创建普通 Tag。',
     syntax: ['/tag candidate'],
     detail:
-      '将 candidate 换成标签名。合并前可登记，合并后创建；已有 Tag 不会被覆盖。名称以字母开头，限 80 字符，可包含字母、数字、下划线、点和连字符，不能含 .. 或以 .lock 结尾。v数字 开头的版本 Tag 由发布流程创建。',
+      '将 candidate 换成标签名。合并前可登记，合并后创建；已有 Tag 不会被覆盖。名称以字母开头，限 80 字符，可包含字母、数字、下划线、点和连字符，不能含 .. 或以 .lock 结尾。v数字 和 release- 前缀保留给正式发布。',
   },
   backport: {
     summary: '维护者把已合并的修改移植到另一分支。',
@@ -58,10 +58,10 @@ const topics: Record<string, { summary: string; syntax: string[]; detail: string
       '在已合并的原 PR 中发送，将 maintenance 换成仓库配置允许的目标分支。Piper 创建新的 PR；新 PR 仍需 CI 和人工审查。遇到冲突时停止自动移植，按回复提示解决冲突后创建 PR。',
   },
   release: {
-    summary: '准备发布、查看部署进度或确认发布。',
+    summary: '创建、查询或提前合并发布 PR。',
     syntax: ['/release prepare', '/release status', '/release publish'],
     detail:
-      '1. 维护者在 Issue 或 PR 中用 /release prepare 创建发布 PR。\n2. 在该发布 PR 中完成 CI 和当前提交的人工批准。\n3. 维护者在该发布 PR 中发送 /release publish，用 Merge Commit 保留提交历史。\n4. Piper 等待部署成功，再创建版本 Tag 和 GitHub Release。合并完成不代表版本已发布。\n\n任何可评论用户都可用 /release status 查询进度。部署失败时，维护者查看 Actions 日志，修复并重跑工作流；无需重复发送发布命令。',
+      '在默认分支 Actions → Request production release 发起，或使用 /release prepare。创建后两小时自动合并，检查未通过时等待。\n\n关闭 PR 或移除 auto-release 可取消；重新发布需先关闭旧 PR。/release publish 可提前合并，仍需通过检查。创建和提前合并限 maintain/admin；/release status 任何可评论用户可用。',
   },
 };
 
@@ -123,7 +123,7 @@ export function commandHelp(topic: string, isPR = true): string {
     ...(isPR
       ? [
           '| 合并普通 PR | `/integrate` |',
-          '| 确认版本发布（维护者） | `/release publish` |',
+          '| 提前合并发布（maintain/admin） | `/release publish` |',
           '| 查看审查安排 | `/reviewers` |',
           '| 修改提交正文 | `/summary 正文` |',
         ]
@@ -134,7 +134,7 @@ export function commandHelp(topic: string, isPR = true): string {
     '',
     ...(isPR
       ? [
-          '普通 PR 的作者或维护者可用 `/integrate` 尝试一次合并；条件未满足时不会排队。新提交需要重新审查。发布 PR 由维护者使用 `/release publish`。',
+          '普通 PR 的作者或维护者可用 `/integrate` 尝试一次合并；条件未满足时不会排队。新提交需要重新审查。发布用法见 `/help release`。',
           '',
           '审查者：Files changed → Review changes → Approve 或 Request changes。普通评论不算批准。',
         ]

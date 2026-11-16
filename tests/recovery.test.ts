@@ -3,7 +3,6 @@ import { GitHub } from '../src/github';
 import { executeCommand, parseCommand } from '../src/commands';
 import { assign, getPR, reconcilePR, rotate } from '../src/pulls';
 import { prState } from '../src/records';
-import { prepareRelease, publishRelease, releaseFor, syncRelease } from '../src/releases';
 import { backport } from '../src/backport';
 import { processJob, tick } from '../src/worker';
 import { sha256, type Job } from '../src/types';
@@ -188,105 +187,6 @@ it('updates merged state without relying on contribution history or webhook orde
   expect(api.comments).toHaveLength(1);
   expect(api.pr.body).toContain('**已合并**');
   expect(api.calls.some((c) => c.route === 'GET /repos/{owner}/{repo}/issues')).toBe(false);
-});
-
-async function preparedRelease() {
-  const f = await fixture('release:\n  enabled: true');
-  const row = (await prepareRelease(f.gh, new Date('2026-10-15T10:00:00Z')))!;
-  await publishRelease(f.gh, 1, 'alice');
-  f.api.workflows = [
-    {
-      id: 10,
-      head_sha: 'merge123',
-      head_branch: 'main',
-      event: 'push',
-      status: 'completed',
-      conclusion: 'success',
-      run_attempt: 1,
-    },
-  ];
-  return { ...f, row };
-}
-describe('release recovery from PR, deployment, tag and release objects', () => {
-  it('keeps release PR reads and Merge Commit on their supported API contract through publication', async () => {
-    const { gh, api, row } = await preparedRelease();
-    await syncRelease(cold(gh, api), row);
-    expect((await releaseFor(gh, await getPR(gh, 1)))?.state).toBe('published');
-    expect(api.tags.get('v0.1.0')).toBe('merge123');
-    expect(api.releases).toHaveLength(1);
-    const merge = api.calls.find((c) => c.route.endsWith('/merge'))!;
-    expect(merge.args).toMatchObject({ merge_method: 'merge', headers: { 'x-github-api-version': '2022-11-28' } });
-    expect(api.calls.some((c) => c.route.includes('/merge-async'))).toBe(false);
-    expect(
-      api.calls
-        .filter((c) => c.route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}')
-        .every((c) => c.args.headers['x-github-api-version'] === '2022-11-28'),
-    ).toBe(true);
-  });
-  it('finishes labeling when PR creation succeeded but its response was lost', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true');
-    loseResponse(api, 'POST /repos/{owner}/{repo}/pulls');
-    const date = new Date('2026-10-15T10:00:00Z');
-    await expect(prepareRelease(gh, date)).rejects.toThrow('Response lost');
-    await prepareRelease(cold(gh, api), date);
-    expect(count(api, 'POST /repos/{owner}/{repo}/pulls')).toBe(1);
-    expect(api.pr.labels).toContainEqual({ name: 'release' });
-  });
-  it('does not prepare a new cycle when an old prepare command retries after publication', async () => {
-    const { gh, api, row } = await preparedRelease();
-    await syncRelease(gh, row);
-    await gh.record(1, 'release-prepare:command-99', { at: '2026-10-15T10:00:00Z' }, 'Original command cycle');
-    await command(gh, api, 99, '/release prepare');
-    expect(count(api, 'POST /repos/{owner}/{repo}/pulls')).toBe(1);
-  });
-  it.each(['skipped', 'failure', 'cancelled', 'missing', 'wrong-sha'])(
-    'refuses a green workflow with deployment job %s',
-    async (state) => {
-      const { gh, api, row } = await preparedRelease();
-      if (state === 'missing') api.workflowJobs = [];
-      else if (state === 'wrong-sha') api.workflowJobs[0].head_sha = 'other';
-      else api.workflowJobs[0].conclusion = state;
-      await syncRelease(cold(gh, api), row);
-      expect(api.tags.size).toBe(0);
-      expect(api.releases).toHaveLength(0);
-      expect((await releaseFor(gh, api.pr))?.state).toBe('deployment_failed');
-    },
-  );
-  it('ignores runs for a different merge SHA or workflow event', async () => {
-    const { gh, api, row } = await preparedRelease();
-    api.workflows[0].head_sha = 'other';
-    await syncRelease(cold(gh, api), row);
-    api.workflows[0].head_sha = 'merge123';
-    api.workflows[0].event = 'pull_request';
-    await syncRelease(cold(gh, api), row);
-    expect(api.tags.size).toBe(0);
-  });
-  it.each(['POST /repos/{owner}/{repo}/git/refs', 'POST /repos/{owner}/{repo}/releases'])(
-    'recovers a lost %s response',
-    async (route) => {
-      const { gh, api, row } = await preparedRelease();
-      loseResponse(api, route);
-      await expect(syncRelease(gh, row)).rejects.toThrow('Response lost');
-      await syncRelease(cold(gh, api), row);
-      expect(api.tags.get('v0.1.0')).toBe('merge123');
-      expect(api.releases).toHaveLength(1);
-      expect(count(api, route)).toBe(1);
-    },
-  );
-  it('refuses an existing conflicting version tag without overwriting it', async () => {
-    const { gh, api, row } = await preparedRelease();
-    api.tags.set('v0.1.0', 'other');
-    await expect(syncRelease(cold(gh, api), row)).rejects.toThrow('拒绝覆盖');
-    expect(api.tags.get('v0.1.0')).toBe('other');
-    expect(api.releases).toHaveLength(0);
-  });
-  it('rejects a manually squashed release even with successful deployment', async () => {
-    const { gh, api, row } = await preparedRelease();
-    api.extra = async (route) =>
-      route === 'GET /repos/{owner}/{repo}/git/commits/{commit_sha}' ? { parents: [{ sha: 'base123' }] } : undefined;
-    await expect(syncRelease(cold(gh, api), row)).rejects.toThrow('Merge Commit');
-    expect(api.tags.size).toBe(0);
-  });
 });
 
 async function backportFixture(conflict = false) {

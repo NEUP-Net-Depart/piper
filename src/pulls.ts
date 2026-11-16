@@ -1,3 +1,4 @@
+import { releaseGate, releasePlan } from './release-policy';
 import { matches } from './config';
 import { stackFor } from './stacks';
 import { manageStacks } from './stack-management';
@@ -115,6 +116,7 @@ export async function gate(
   release = false,
   changedFiles?: Awaited<ReturnType<typeof filesFor>>,
 ): Promise<Gate> {
+  if (release && (await releasePlan(gh, pr))) return releaseGate(gh, pr);
   const cfg = gh.config!;
   const headSeenAt = await observedHeadAt(gh, pr);
   const state = await prState(gh, pr);
@@ -157,7 +159,7 @@ export async function gate(
     action: pr.mergeable === null ? undefined : '查看 PR 页面底部的合并区域，按提示补齐分支保护要求。',
   });
   let stack: Awaited<ReturnType<typeof stackFor>> | undefined;
-  if (!release) {
+  {
     try {
       stack = await stackFor(gh, pr);
       if (stack.detail) {
@@ -190,29 +192,17 @@ export async function gate(
   }
   const target = stack?.target ?? pr.stack?.base?.ref ?? pr.base.ref;
   const targetStart = reasons.length;
-  if (
-    release &&
-    (pr.base.ref !== cfg.release.target ||
-      pr.head.ref !== cfg.release.source ||
-      pr.head.repo?.full_name.toLowerCase() !== gh.repo.toLowerCase() ||
-      pr.user.login !== gh.env.BOT_LOGIN ||
-      pr.user.type !== 'Bot' ||
-      !/^<!-- piper-release:v1:\d{4}-\d{2}-\d{2}:v\d+\.\d+\.\d+:[a-zA-Z0-9]+ -->/.test(pr.body ?? ''))
-  )
-    reasons.push('请使用 Piper 创建的发布 PR');
-  if (!release && (!cfg.merge.allowedBases.includes(target) || cfg.merge.protectedBranches.includes(target)))
+  if (!cfg.merge.allowedBases.includes(target) || cfg.merge.protectedBranches.includes(target))
     reasons.push(
       `目标分支 ${target} 不允许普通集成。普通贡献可使用：${cfg.merge.allowedBases.filter((b) => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '暂无可用分支'}。`,
     );
-  if (!release && target === cfg.release.target) reasons.push('发布目标分支必须使用发布流程');
+  if (target === cfg.release.target) reasons.push('发布目标分支必须使用发布流程');
   progress.push({
     name: '目标分支',
     ready: reasons.length === targetStart,
     detail: target,
     owner: '维护者',
-    action: release
-      ? '使用 /release prepare 创建发布 PR，再到该 PR 完成检查并发布。'
-      : `确认 PR 的目标分支；普通贡献使用 ${cfg.merge.allowedBases.filter((b) => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '仓库配置允许的分支'}。`,
+    action: `确认 PR 的目标分支；普通贡献使用 ${cfg.merge.allowedBases.filter((b) => !cfg.merge.protectedBranches.includes(b) && b !== cfg.release.target).join('、') || '仓库配置允许的分支'}。`,
   });
   const files = changedFiles ?? (await filesFor(gh, pr.number));
   // GitHub caps PR files at 3,000. Never treat a capped response as complete.
@@ -228,7 +218,6 @@ export async function gate(
   }
   const policy = reviewPolicy(cfg, pr, files, state.metadata);
   const highRisk =
-    release ||
     policy.highRisk ||
     files.some((f) =>
       cfg.merge.highRiskFiles.some(
@@ -255,7 +244,7 @@ export async function gate(
     if (review.state === 'APPROVED' && review.commit_id === pr.head.sha) approved.push(review.user.login);
     if (review.state === 'APPROVED' && review.commit_id !== pr.head.sha) outdated.push(review.user.login);
   }
-  const minimum = release ? Math.max(cfg.release.minApprovals, policy.minimum) : policy.minimum;
+  const minimum = policy.minimum;
   if (approved.length < minimum)
     reasons.push(
       `当前提交需要至少 ${minimum} 位有仓库写权限的人工审查者批准，目前已有 ${approved.length} 位。PR 作者和 Bot 不计入批准人数。`,
@@ -273,18 +262,13 @@ export async function gate(
           ? '在 Files changed → Review changes 中提交批准或修改意见。'
           : '当前没有待处理的审查请求。用 /reviewers add 用户名 邀请审查者，或在 GitHub 的 Reviewers 中选择。',
   });
-  const ci = await checkProgress(
-    gh,
-    pr.head.sha,
-    release ? cfg.release.requiredChecks : cfg.merge.requiredChecks,
-    headSeenAt,
-  );
+  const ci = await checkProgress(gh, pr.head.sha, cfg.merge.requiredChecks, headSeenAt);
   reasons.push(...ci.reasons);
   progress.push(...ci.progress);
   if (ci.missing && Date.now() < headSeenAt + CI_STARTUP_GRACE_MS && pr.state === 'open') {
     gh.ciStartupRefreshes.set(pr.number, { head: pr.head.sha, at: headSeenAt + CI_STARTUP_GRACE_MS });
   } else gh.ciStartupRefreshes.delete(pr.number);
-  if (!release) {
+  {
     const commits = await gh.list('GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', { pull_number: pr.number });
     if (commits.length >= 250) {
       reasons.push('提交数量达到 GitHub 的 250 条读取上限');
@@ -459,8 +443,13 @@ async function integrateCurrent(
 }
 export async function tagPR(gh: GitHub, pr: PR, tag: string) {
   if (!pr.merged || !pr.merge_commit_sha) throw new Denied('只能给已合并 PR 创建 Tag');
-  // Production version tags belong exclusively to the human-approved release flow.
-  if (/^v\d/.test(tag) || !/^[a-zA-Z][\w.-]{0,79}$/.test(tag) || tag.endsWith('.lock') || tag.includes('..'))
+  // Production version tags belong exclusively to the production deployment workflow.
+  if (
+    /^(?:v\d|release-)/.test(tag) ||
+    !/^[a-zA-Z][\w.-]{0,79}$/.test(tag) ||
+    tag.endsWith('.lock') ||
+    tag.includes('..')
+  )
     throw new Denied('普通 Tag 不得使用版本号，且必须是安全的单段名称');
   return gh.write(
     `tag:${tag}:${pr.merge_commit_sha}`,
@@ -761,8 +750,10 @@ export async function reconcilePR(gh: GitHub, number: number, renderAll = false)
     filesBase = pr.base.sha;
   const files = await filesFor(gh, number);
   const policy = reviewPolicy(gh.config!, pr, files);
-  await rotate(gh, pr, policy);
-  await assign(gh, pr, undefined, gh.job, policy);
+  if (!(await releasePlan(gh, pr))) {
+    await rotate(gh, pr, policy);
+    await assign(gh, pr, undefined, gh.job, policy);
+  }
   pr = await getPR(gh, number);
   const state = await prState(gh, pr);
   if (pr.state !== 'open') {

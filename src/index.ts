@@ -168,6 +168,19 @@ app.post('/webhooks/github', async (c) => {
     return c.json({ error: 'invalid issue number' }, 400);
   if (job.kind === 'command' && (!Number.isSafeInteger(job.commentId) || job.commentId! <= 0))
     return c.json({ error: 'invalid comment ID' }, 400);
+  if (
+    event === 'workflow_run' &&
+    data.workflow_run?.event === 'workflow_dispatch' &&
+    data.workflow_run.conclusion === 'success' &&
+    Number.isSafeInteger(data.workflow_run.id) &&
+    data.workflow_run.id > 0
+  )
+    job = {
+      ...job,
+      id: `release-request:${repo.toLowerCase()}:${data.workflow_run.id}`,
+      kind: 'release',
+      releaseRunId: data.workflow_run.id,
+    };
   const related =
     event === 'check_run'
       ? data.check_run?.pull_requests
@@ -177,7 +190,7 @@ app.post('/webhooks/github', async (c) => {
           ? data.workflow_run?.pull_requests
           : undefined;
   let jobs = [job];
-  if (Array.isArray(related) && related.length) {
+  if (!job.releaseRunId && Array.isArray(related) && related.length) {
     const numbers = [...new Set(related.map((p: any) => p.number))];
     if (numbers.length > 100 || numbers.some((n) => !Number.isSafeInteger(n) || n <= 0))
       return c.json({ error: 'invalid related PRs' }, 400);

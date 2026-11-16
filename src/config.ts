@@ -116,8 +116,8 @@ export const configSchema = z
     release: z
       .object({
         enabled: z.boolean().default(false),
-        source: branch.default('dev'),
-        target: branch.default('main'),
+        source: z.literal('dev').default('dev'),
+        target: z.literal('main').default('main'),
         timezone: z
           .string()
           .refine((x) => {
@@ -136,6 +136,10 @@ export const configSchema = z
           .string()
           .regex(/^v\d+\.\d+\.\d+$/)
           .default('v0.1.0'),
+        requestWorkflow: z
+          .string()
+          .regex(/^[\w.-]+\.ya?ml$/)
+          .default('release.yml'),
         deploymentWorkflow: z
           .string()
           .regex(/^[\w.-]+\.ya?ml$/)
@@ -154,6 +158,7 @@ export const configSchema = z
         hour: 18,
         version: 'patch',
         initialVersion: 'v0.1.0',
+        requestWorkflow: 'release.yml',
         deploymentWorkflow: 'ci.yml',
         deploymentJob: 'release',
         requiredChecks: ['verify'],
@@ -164,8 +169,6 @@ export const configSchema = z
   .superRefine((c, ctx) => {
     if (c.reviewers.rotateHours <= c.reviewers.remindHours)
       ctx.addIssue({ code: 'custom', message: 'rotateHours must exceed remindHours' });
-    if (c.release.source === c.release.target)
-      ctx.addIssue({ code: 'custom', message: 'Release source and target must differ' });
     if (new Set(c.reviewers.pool.map((x) => x.toLowerCase())).size !== c.reviewers.pool.length)
       ctx.addIssue({ code: 'custom', message: 'Duplicate reviewers' });
     const reserved = ['rfr', 'ready', 'integrated', 'auto'];

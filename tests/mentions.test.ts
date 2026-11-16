@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { GitHub } from '../src/github';
 import { addressUser } from '../src/mentions';
 import { notifyPR, reconcilePR, rotate, welcome } from '../src/pulls';
-import { prepareRelease, publishRelease, syncRelease } from '../src/releases';
 import { STATUS_MARKER, visibleComment } from '../src/records';
 import { READY_MARKER } from '../src/status';
 import { sha256, type Job } from '../src/types';
@@ -161,35 +160,5 @@ describe('targeted mentions', () => {
     const reminders = bots(api).filter((c) => c.body.includes(hours === 25 ? '审查请求已等待' : '没有可用替补'));
     expect(reminders).toHaveLength(1);
     expect(mentions(reminders[0].body)).toEqual(['bob']);
-  });
-
-  it('addresses the publishing maintainer in deployment failures and recovered results of a Bot-authored PR', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true');
-    const row = (await prepareRelease(gh, new Date('2026-10-15T10:00:00Z')))!;
-    await publishRelease(gh, 1, 'carol');
-    api.workflows = [
-      {
-        id: 10,
-        head_sha: 'merge123',
-        head_branch: 'main',
-        event: 'push',
-        status: 'completed',
-        conclusion: 'failure',
-        run_attempt: 1,
-      },
-    ];
-    api.workflowJobs[0].conclusion = 'failure';
-    await syncRelease(cold(gh, api), row);
-    await syncRelease(cold(gh, api), row);
-    const failures = bots(api).filter((c) => c.body.includes('发布部署未成功'));
-    expect(failures).toHaveLength(1);
-    expect(mentions(failures[0].body)).toEqual(['carol']);
-    await notifyPR(cold(gh, api), 1);
-    await notifyPR(cold(gh, api), 1);
-    const results = bots(api).filter((c) => c.body.includes('已集成到'));
-    expect(results).toHaveLength(1);
-    expect(mentions(results[0].body)).toEqual(['carol']);
-    expect(api.tags.size).toBe(0);
-    expect(api.releases).toHaveLength(0);
   });
 });

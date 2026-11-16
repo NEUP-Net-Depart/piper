@@ -35,6 +35,7 @@ export interface Job {
   configChanged?: boolean;
   closedSince?: string;
   syncOnly?: boolean;
+  releaseRunId?: number;
   stackChanged?: boolean;
   repository?: boolean;
 }
@@ -59,6 +60,7 @@ export interface PR {
   mergeable: boolean | null;
   mergeable_state: string;
   merged_at?: string | null;
+  created_at?: string;
   author_association?: string;
   requested_reviewers: { login: string }[];
   labels: { name: string }[];

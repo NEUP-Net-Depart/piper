@@ -25,6 +25,7 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
 export function pull(overrides: Partial<PR> = {}): PR {
   return {
     number: 1,
+    created_at: new Date().toISOString(),
     title: 'fix: repair booking',
     body: '',
     state: 'open',
@@ -95,6 +96,10 @@ export class FakeGitHub implements Requester {
       if (value !== undefined)
         return { data: value, status: route.endsWith('/merge-async') && value.status === 'pending' ? 202 : 200 };
     }
+    if (route === 'POST /graphql')
+      return {
+        data: { data: { repository: { object: { authors: { nodes: [], pageInfo: { hasNextPage: false } } } } } },
+      };
     if (route === 'GET /repos/{owner}/{repo}')
       return { data: { full_name: repo, default_branch: 'main', private: false } };
     if (route === 'GET /repos/{owner}/{repo}/installation') return { data: { id: 1 } };
@@ -130,6 +135,7 @@ export class FakeGitHub implements Requester {
     if (route === 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}') {
       const pr = [this.pr, ...this.prs].find((p) => p.number === args.pull_number) ?? this.pr;
       if (typeof args.body === 'string') pr.body = args.body;
+      if (typeof args.title === 'string') pr.title = args.title;
       if (typeof args.base === 'string') {
         pr.base.ref = args.base;
         pr.base.sha = [this.pr, ...this.prs].find((p) => p.head.ref === args.base)?.head.sha ?? 'base123';
@@ -138,6 +144,17 @@ export class FakeGitHub implements Requester {
     }
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files') return { data: this.files };
     if (route === 'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews') return { data: this.reviews };
+    if (route === 'GET /repos/{owner}/{repo}/check-runs/{check_run_id}')
+      return {
+        data: {
+          head_sha: this.pr.head.sha,
+          app: { id: 1 },
+          check_suite: { id: 5 },
+          status: 'completed',
+          conclusion: 'success',
+        },
+      };
+    if (route === 'GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls') return { data: [] };
     if (route.endsWith('/check-runs')) return { data: { check_runs: this.runs } };
     if (route.endsWith('/statuses')) return { data: this.statuses };
     if (route === 'GET /repos/{owner}/{repo}/issues') return { data: this.issueHistory };
@@ -222,7 +239,7 @@ export class FakeGitHub implements Requester {
     }
     if (route === 'GET /repos/{owner}/{repo}/git/ref/{ref}') {
       if (args.ref.startsWith('heads/'))
-        return { data: { object: { sha: args.ref === 'heads/dev' ? 'abc123' : 'base123' } } };
+        return { data: { object: { sha: args.ref === 'heads/dev' ? this.pr.head.sha : 'base123' } } };
       const sha = this.tags.get(args.ref.replace('tags/', ''));
       if (!sha) throw Object.assign(new Error('not found'), { status: 404 });
       return { data: { object: { sha, type: 'commit' } } };
@@ -240,7 +257,7 @@ export class FakeGitHub implements Requester {
           commits: [
             {
               sha: 'abc123',
-              author: { login: 'alice' },
+              author: { login: 'alice', type: 'User' },
               commit: { author: { name: 'Alice' }, message: 'fix booking' },
             },
           ],
@@ -263,6 +280,8 @@ export class FakeGitHub implements Requester {
       const created = {
         ...this.pr,
         number: 1,
+        created_at: new Date().toISOString(),
+        draft: args.draft ?? false,
         title: args.title,
         body: args.body,
         user: { login: 'piper[bot]', type: 'Bot' },
@@ -314,4 +333,37 @@ export async function fixture(config = '', overrides: Partial<Env> = {}) {
   gh.config = parseConfig(environment.ORG_DEFAULTS, 'enabled: true\ndryRun: false\n' + config);
   gh.commandOrder = 1;
   return { env: environment, api, gh };
+}
+
+export async function releaseFixture(config = '') {
+  const f = await fixture(
+    'release:\n  enabled: true\n  deploymentWorkflow: check.yml\n  requiredChecks: [checks, browser, test, migrate-preview]\n' +
+      config,
+  );
+  f.gh.actor = 'carol';
+  devSuccess(f.api);
+  return f;
+}
+export function devSuccess(api: FakeGitHub) {
+  api.workflows = [
+    {
+      id: 10,
+      run_attempt: 1,
+      head_sha: api.pr.head.sha,
+      head_branch: 'dev',
+      event: 'push',
+      path: '.github/workflows/check.yml',
+      repository: { full_name: repo },
+      check_suite_id: 5,
+      status: 'completed',
+      conclusion: 'success',
+    },
+  ];
+  api.workflowJobs = ['checks', 'browser', 'test', 'migrate-preview', 'release'].map((name, i) => ({
+    name,
+    head_sha: api.pr.head.sha,
+    status: 'completed',
+    conclusion: 'success',
+    check_run_url: `https://api.github.com/repos/${repo}/check-runs/${i + 1}`,
+  }));
 }

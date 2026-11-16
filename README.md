@@ -1,6 +1,6 @@
 # Piper
 
-Piper 是运行在 Cloudflare Workers 上的 GitHub App，负责 PR 审查分配、检查进度、合并和发布。业务状态保存在 GitHub 评论中，Queues 处理任务，Durable Objects 协调并发，Cron 每小时整点补偿检查；无需 D1 数据库。
+Piper 是运行在 Cloudflare Workers 上的 GitHub App，负责 PR 审查分配、检查进度、合并和发布。业务状态保存在 GitHub 评论中，Queues 处理任务，Durable Objects 协调并发，Cron 每五分钟核验待发布 PR，每小时整点补偿普通 PR 检查；无需 D1 数据库。发布请求去重还使用现有 Durable Object storage。
 
 本文包含[机器人部署](#机器人部署)和[仓库 YAML 配置](#仓库-yaml-配置)。使用机器人时，在 Issue 或 PR 中新建评论发送 `/help`；单项用法用 `/help integrate` 等，完整列表用 `/help all`。
 
@@ -39,7 +39,7 @@ npx wrangler login
 
 也可运行 `npm run manifest -- https://你的域名` 生成相同配置的 Manifest，按照 [GitHub Manifest 注册流程](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)注册。该脚本只输出 JSON，不会自动创建 App。
 
-目标仓库应启用 Squash；需要 Piper 发布时也启用 Merge Commit。配置必需 CI、人工审查、推送新提交后旧批准失效及分支删除保护。不要将 App 加入分支规则 bypass。保留发布源分支和目标分支，避免合并后自动删除长期分支。
+目标仓库应启用 Squash；需要 Piper 发布时也启用 Merge Commit。配置必需 CI、人工审查、推送新提交后旧批准失效及分支删除保护。统一使用现有 Piper App。只在独立的 main 人工审查 Ruleset 中赋予 Piper PR 合并时的豁免，普通集成仍显式使用 `bypass_rules: false`，见 [Release 操作说明](docs/releases.md)。保留发布源分支和目标分支，避免合并后自动删除长期分支。
 
 ### 3. 创建 Cloudflare 队列
 
@@ -121,7 +121,7 @@ Piper 仓库的 `.github/workflows/ci.yml` 在 push / PR 时检查代码；`.git
 | 收到事件但没有评论 | 检查 App 安装范围、仓库白名单、`enabled`、两层 Dry-run 和停用开关 |
 | Webhook 入队失败 | 在 GitHub App Recent deliveries 重投原事件；Cron 不恢复未入队命令 |
 | 任务进入 DLQ | 核对失败原因，在保留期内将原消息重放到 `piper-production` 队列，保留原 job ID |
-| 发布部署失败 | 查看工作流日志，修复并重跑同一合并提交的工作流，Piper 会重新核验 |
+| 发布部署失败 | 查看业务仓库 Actions，修复并重跑同一提交；部署及 Smoke 成功后由 Actions 创建 Tag |
 | 命令评论或提交已改变 | 在新评论中重新发送命令 |
 
 管理接口使用 `Authorization: Bearer ADMIN_TOKEN`：`GET /admin/status` 查看环境开关，`GET /admin/audit?repo=owner/repo&number=1` 读取 Bot 回执，`POST /admin/reconcile?repo=owner/repo` 请求状态重扫。重扫不会重放命令。保留 Bot 评论中的隐藏回执，并监控 Worker 日志、队列积压和 DLQ。恢复记录只从 Piper 自己的 Bot 评论读取，PR 描述中的复选框不作为合并授权依据。停用不撤回已发出的请求；环境停用期间消息可能继续重试并进入 DLQ。
@@ -191,15 +191,10 @@ release:
   enabled: false
   source: dev
   target: main
-  timezone: Asia/Shanghai
-  weekday: 4
-  hour: 18
-  version: patch
-  initialVersion: v0.1.0
+  requestWorkflow: release.yml
   deploymentWorkflow: ci.yml
   deploymentJob: release
-  requiredChecks: [verify]
-  minApprovals: 1
+  requiredChecks: [verify] # 同一 dev push 工作流的实际 Job 名，另强制校验 deploymentJob
 ```
 
 ### 字段说明
@@ -227,11 +222,10 @@ release:
 | `labels` | 默认 `[]`，最多 50 条；按下面的规则自动设置标签和模块审查要求 |
 | `backport.enabled` / `targets` / `maxFiles` | 默认 `false` / `[]` / `50`；允许将已合并 PR 移植到列出的分支，目标最多 20 个，文件限制 1–100 |
 | `release.enabled` | 默认 `false`；为 Worker 仓库白名单内的仓库启用下述发布流程 |
-| `release.source` / `target` | 默认 `dev` / `main`，两者必须不同；目标分支即使未开启发布，也不能走普通 Squash 或 Backport |
-| `release.timezone` / `weekday` / `hour` | 默认 `Asia/Shanghai` / `4` / `18`，即北京时间周四 18 点后开始准备；星期 0–6 表示周日到周六，小时 0–23，实际执行受 Cron 和队列影响 |
-| `release.version` / `initialVersion` | 默认 `patch` / `v0.1.0`；`patch` 增加补丁号，`minor` 增加次版本并清零补丁号，`date` 使用 `v年.月.日`；初始版本只用于尚无版本的 patch / minor 发布 |
-| `release.deploymentWorkflow` / `deploymentJob` | 默认 `ci.yml` / `release`；目标分支 push 后运行的工作流文件名和实际部署 Job 名称 |
-| `release.requiredChecks` / `minApprovals` | 默认 `[verify]` / `1`；发布合并前的检查和批准要求，批准数还须满足仓库、模块及命令设置的更高要求 |
+| `release.source` / `target` | 固定 `dev` / `main`；目标分支即使未开启发布，也不能走普通 Squash 或 Backport |
+| `release.requestWorkflow` | 默认 `release.yml`；只接受默认分支上 maintain/admin 发起且成功完成的 workflow_dispatch |
+| `release.requiredChecks` | 默认 `[verify]`；dev push 工作流必须成功的 Job 名，同时强制校验 `deploymentJob`；不检查 PR 中刻意跳过的测试 |
+| `release.deploymentWorkflow` / `deploymentJob` | 默认 `ci.yml` / `release`；dev push 的 CI/Preview 工作流文件名和部署、Smoke Job 名称 |
 
 `merge.trustedCheckAppIds` 须使用已知可信 CI 运行记录中的 `app.id`，也适用于发布 PR。缺少必需检查时，从首次观察到当前提交起等待五分钟，再通过延迟队列任务重新检查；重启、评论和标签更新不会重置计时，队列重试或服务停用可能使实际检查延后。普通 PR 达到 250 个提交的读取上限时，Piper 停止集成并提示人工处理。
 
@@ -241,7 +235,7 @@ release:
 
 普通集成统一使用 GitHub 异步合并 API（版本 `2026-03-10`），绑定已核验的 HEAD，指定 Squash、直接合并且不绕过规则。命令回执表示命令已处理；GitHub 受理后，Piper 更新同一回复及 PR Progress，直到确认成功或失败。`/integrate cancel` 不会撤回 GitHub 已受理的请求。
 
-异步结果通过已保存的 UUID 查询，以 `merged` 结果的 `details.sha` 核验最终提交。PR 读取及现有发布流程固定使用 `2022-11-28` 契约，保留其依赖的 `merge_commit_sha` 字段；Stack 和异步合并接口使用 `2026-03-10`。成功后在原回执中展示提交、感谢文案及配置的庆祝图片。
+异步结果通过已保存的 UUID 查询，以 `merged` 结果的 `details.sha` 核验最终提交。PR 读取及发布 Merge Commit 固定使用 `2022-11-28` 契约，保留其依赖的 `merge_commit_sha` 字段；Stack 和异步合并接口使用 `2026-03-10`。成功后在原回执中展示提交、感谢文案及配置的庆祝图片。
 
 合并意图、UUID 和最终结果保存在 Bot 评论回执中，延迟 Queue 任务查询进度，Cron/状态刷新可恢复丢失的轮询。临时查询故障最多连续重试五次。提交响应丢失时只观察 PR，不盲目重新发起请求；UUID 过期、超过 24 小时或结果无法可靠确认时停止并提示维护者核实。GitHub 不提供 Stack 版本锁，最后一次核验与 GitHub 执行之间仍可能发生外部变更；受理后 Piper 无法撤回该请求。
 
@@ -280,9 +274,9 @@ Backport 只用于已合并 PR。启用时配置 `backport.targets`；若希望�
 
 发布功能适用于 Worker 仓库白名单（`ALLOWED_REPOSITORIES`）内启用 `release.enabled: true` 的仓库。发布源分支、目标分支、检查和部署工作流均按该仓库的配置执行；实际写入还须满足前述 App 安装、启用、Dry-run 和停用开关要求。
 
-启用后，Piper 按计划创建 `source → target` 发布 PR；无新增提交时跳过。审查和 CI 满足后，维护者发送 `/release publish`，Piper 使用 Merge Commit 合并，再核对该合并 SHA 在目标分支上的 `push` 工作流和指定部署 Job。工作流及部署 Job 均成功后才创建版本 Tag 和正式 Release，并标记为最新版本。`/release prepare` 可手动准备，`/release status` 查询进度。
+维护者在默认分支 Actions → **Request production release** 发起，或使用 `/release prepare`。Piper 创建或更新正式 `dev → main` PR，两小时后检查通过即自动合并。关闭 PR 或移除 `auto-release` 可取消；`/release publish` 可提前合并。
 
-预约系统可使用 `examples/appointment.piper.yml`：检查为 `test`，部署工作流为 `check.yml`，部署 Job 为 `release`。这些名称必须与接入仓库的实际工作流一致。
+操作、权限和 Tag 规则见 [Release 操作说明](docs/releases.md)，预约系统配置见 `examples/appointment.piper.yml`。旧 `weekday`、`hour`、`version`、`initialVersion`、`timezone`、`minApprovals` 字段仅兼容解析，可删除；旧 v1 发布 PR 需维护者重新触发登记。
 
 ### 组织默认值与本地运行
 

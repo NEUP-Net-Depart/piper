@@ -27,17 +27,15 @@ export function commitMessage(
 }
 
 export function integratedMessage(gh: Pick<GitHub, 'repo' | 'config' | 'env'>, pr: PR, sha = pr.merge_commit_sha) {
+  if (gh.config!.release.enabled && pr.base.ref === gh.config!.release.target) return '已合并。';
   const welcome = gh.config!.welcome;
   const image = welcome.image.startsWith('/') ? new URL(welcome.image, gh.env.PUBLIC_URL).href : welcome.image;
-  const release = gh.config!.release.enabled && pr.base.ref === gh.config!.release.target;
   return addressUser(
     pr.user,
     [
       `已集成到 \`${safeText(pr.base.ref)}\`：[${sha?.slice(0, 12)}](https://github.com/${gh.repo}/commit/${sha})。`,
-      release
-        ? '代码已合并；部署成功后创建版本 Tag 和 Release。发布进度：`/release status`。'
-        : safeText(welcome.merged),
-      !release && welcome.merged && image ? `![庆祝合并](${image})` : '',
+      safeText(welcome.merged),
+      welcome.merged && image ? `![庆祝合并](${image})` : '',
     ]
       .filter(Boolean)
       .join('\n\n'),

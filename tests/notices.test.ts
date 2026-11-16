@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { vi, describe, expect, it } from 'vitest';
 import { executeCommand, parseCommand } from '../src/commands';
 import { commitMessage } from '../src/commits';
 import { GitHub } from '../src/github';
@@ -8,7 +8,7 @@ import { prState, visibleComment } from '../src/records';
 import { READY_MARKER } from '../src/status';
 import { processJob } from '../src/worker';
 import { sha256, type Job } from '../src/types';
-import { fixture, repo, type FakeGitHub } from './fixtures';
+import { releaseFixture, fixture, repo, type FakeGitHub } from './fixtures';
 
 const readyRows = (api: FakeGitHub) =>
   api.comments.filter(
@@ -315,15 +315,18 @@ describe('explicit manual and automatic integration', () => {
     expect(api.writes().some((c) => c.route.endsWith('/merge-async'))).toBe(false);
   });
 
-  it('uses the release command and Merge Commit preview for scheduled production PRs', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true');
-    await prepareRelease(gh, new Date('2026-10-15T10:00:00Z'));
+  it('shows a concise title preview for due release PRs', async () => {
+    vi.useFakeTimers();
+    const { gh, api } = await releaseFixture();
+    await prepareRelease(gh, new Date(), true);
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
     await notifyPR(gh, 1);
     expect(readyRows(api)).toHaveLength(1);
-    expect(readyRows(api)[0].body).toContain('\n/release publish\n');
-    expect(readyRows(api)[0].body).toContain('Merge Commit');
+    expect(readyRows(api)[0].body).toContain('等待合并。');
+    expect(readyRows(api)[0].body).not.toContain('审查要求');
     expect(readyRows(api)[0].body).not.toContain('Squash');
-    expect(readyRows(api)[0].body).toContain('Release v0.1.0 (#1)');
+    expect(readyRows(api)[0].body).toContain(api.pr.title);
+    vi.useRealTimers();
   });
 
   it('keeps ready notifications within the Free plan request budget', async () => {
@@ -342,15 +345,16 @@ describe('explicit manual and automatic integration', () => {
   });
 
   it('reuses the release publish result instead of adding a second completion comment', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true');
-    await prepareRelease(gh, new Date('2026-10-15T10:00:00Z'));
+    const { gh, api } = await releaseFixture();
+    api.permissions.alice = 'admin';
+    await prepareRelease(gh, new Date(), true);
     await notifyPR(gh, 1);
     await command(gh, api, 1, '/release publish');
     const before = api.comments.length;
     await notifyPR(cold(gh, api), 1);
     expect(api.comments).toHaveLength(before);
     expect(api.comments.some((c) => c.body.startsWith('<!-- piper:integrated -->'))).toBe(false);
-    expect(api.comments.filter((c) => visibleComment(c.body).includes('已集成到'))).toHaveLength(1);
+    expect(api.comments.filter((c) => visibleComment(c.body).includes('已合并。'))).toHaveLength(1);
     expect(api.writes().find((c) => c.route.endsWith('/merge'))?.args.merge_method).toBe('merge');
   });
 });

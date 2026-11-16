@@ -48,12 +48,7 @@ release:
   enabled: true
   source: dev
   target: main
-  timezone: Asia/Shanghai
-  weekday: 4
-  hour: 18 # 北京时间周四 18:00。
-  version: patch
-  initialVersion: v0.1.0
+  requestWorkflow: release.yml
   deploymentWorkflow: check.yml
   deploymentJob: release
-  requiredChecks: [test]
-  minApprovals: 1
+  requiredChecks: [checks, browser, test, migrate-preview]

@@ -2,9 +2,10 @@ import { allowed, parseConfig } from './config';
 import { commandResult, executeCommand, parseCommand } from './commands';
 import { GitHub, appApi, installationApi, stopped, type Requester } from './github';
 import { getPR, reconcilePR, refreshPR, welcome } from './pulls';
-import { listReleases, prepareRelease, syncRelease } from './releases';
+import { listReleases, requestRelease, syncRelease } from './releases';
 import { Denied, names, sha256, type Env, type Job, type PR } from './types';
 import { addressUser } from './mentions';
+import { releasePlan } from './release-policy';
 import { trackMerge } from './merging';
 
 export async function installationFor(env: Env, repo: string, api = appApi(env)): Promise<number> {
@@ -102,11 +103,7 @@ async function dispatch(gh: GitHub, job: Job) {
     if (more && !gh.dryRun) await refresh();
     if (gh.config!.release.enabled) {
       const pr = await getPR(gh, job.number!);
-      if (
-        pr.user.login === gh.env.BOT_LOGIN &&
-        pr.user.type === 'Bot' &&
-        pr.body?.startsWith('<!-- piper-release:v1:')
-      ) {
+      if (pr.user.login === gh.env.BOT_LOGIN && pr.user.type === 'Bot' && (await releasePlan(gh, pr))) {
         await gh.env.TASKS.send({
           id: job.id + ':release',
           repo: gh.repo,
@@ -129,9 +126,8 @@ async function dispatch(gh: GitHub, job: Job) {
       } satisfies Job);
   } else if (job.kind === 'release') {
     if (!gh.config!.release.enabled) return;
-    if (!job.syncOnly) await prepareRelease(gh, new Date(job.time));
-    for (const release of await listReleases(gh))
-      if (!['published', 'cancelled'].includes(release.state)) await syncRelease(gh, release);
+    if (job.releaseRunId) await requestRelease(gh, job.releaseRunId);
+    for (const release of await listReleases(gh, true)) if (release.state === 'waiting') await syncRelease(gh, release);
   } else if (job.kind === 'scan') {
     const open = await gh.list<PR>('GET /repos/{owner}/{repo}/pulls', { state: 'open' });
     // Poll recent closed PRs as a fallback for a lost merged webhook (tags/welcome).
@@ -161,7 +157,8 @@ async function dispatch(gh: GitHub, job: Job) {
       });
     const release = gh.config!.release;
     const deployment =
-      (!job.workflow || job.workflow === release.deploymentWorkflow) && (!job.branch || job.branch === release.target);
+      (!job.workflow || job.workflow === release.deploymentWorkflow) &&
+      (!job.branch || job.branch === release.target || job.branch === release.source);
     if (release.enabled && (!job.syncOnly || deployment))
       await gh.env.TASKS.send({
         id: job.id + ':release',
@@ -169,7 +166,7 @@ async function dispatch(gh: GitHub, job: Job) {
         installation: job.installation,
         kind: 'release',
         time: job.time,
-        syncOnly: job.syncOnly,
+        syncOnly: true,
       });
   }
 }
@@ -280,6 +277,17 @@ export async function tick(env: Env, date: Date, api?: Requester) {
     if (!allowed(env, repo) || stopped(env, repo)) continue;
     try {
       const installation = await installationFor(env, repo, api);
+      if (date.getUTCMinutes() !== 0) {
+        await env.TASKS.send({
+          id: 'release-tick:' + repo + ':' + Math.floor(date.getTime() / 300000),
+          repo,
+          installation,
+          kind: 'release',
+          time: date.toISOString(),
+          syncOnly: true,
+        });
+        continue;
+      }
       const full = date.getUTCHours() === 0;
       await env.TASKS.send({
         id: 'cron:' + repo + ':' + Math.floor(date.getTime() / 3600000),

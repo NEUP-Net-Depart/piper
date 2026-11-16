@@ -4,7 +4,7 @@ import { GitHub } from '../src/github';
 import { commandHelp } from '../src/help';
 import { gate, notifyPR, reconcilePR } from '../src/pulls';
 import { prState, visibleComment } from '../src/records';
-import { prepareRelease, releaseFor, syncRelease } from '../src/releases';
+import { prepareRelease } from '../src/releases';
 import { integrationNotice, summarize, READY_MARKER, PROGRESS_START } from '../src/status';
 import { fixture, type FakeGitHub } from './fixtures';
 
@@ -279,11 +279,12 @@ describe('discoverable help and review commands', () => {
 
   it('distinguishes ordinary integration from release publication in release PR help', async () => {
     const { gh, api } = await fixture('release:\n  enabled: true');
-    await prepareRelease(gh, new Date('2026-10-15T10:00:00Z'));
+    gh.actor = 'carol';
+    await prepareRelease(gh, new Date(), true);
     await command(gh, api, 1, '/help');
     const reply = api.comments.at(-1).body;
     expect(reply).toContain('| 合并普通 PR | `/integrate` |');
-    expect(reply).toContain('| 确认版本发布（维护者） | `/release publish` |');
+    expect(reply).toContain('| 提前合并发布（maintain/admin） | `/release publish` |');
     expect(reply).not.toContain('合并当前 PR');
   });
 
@@ -307,43 +308,5 @@ describe('discoverable help and review commands', () => {
     await expect(command(gh, api, 1, '/reviewers add bob')).rejects.toThrow('Ready for review');
     expect(api.pr.requested_reviewers).toEqual([]);
     expect(api.writes()).toEqual([]);
-  });
-});
-
-describe('release progress for developers', () => {
-  it('guides approval, deployment failure and publication with the actual release state', async () => {
-    const { gh, api } = await fixture('release:\n  enabled: true\n  minApprovals: 2');
-    const row = (await prepareRelease(gh, new Date('2026-10-15T10:00:00Z')))!;
-    await command(gh, api, 1, '/reviewers');
-    expect(api.comments.at(-1).body).toContain('1/2');
-    await expect(command(gh, api, 7, '/reviewers 1')).rejects.toThrow('2–10');
-    await command(gh, api, 2, '/release status');
-    expect(api.comments.at(-1).body).toContain('等待审查与发布确认');
-    expect(api.comments.at(-1).body).toContain('/release publish');
-    api.reviews.push({ id: 2, user: { login: 'carol', type: 'User' }, state: 'APPROVED', commit_id: api.pr.head.sha });
-    await command(gh, api, 3, '/release publish');
-    expect(api.comments.at(-1).body).toContain('代码已合并；部署成功后创建版本 Tag 和 Release');
-    await command(gh, api, 4, '/release status');
-    expect(api.comments.at(-1).body).toContain('已合并，等待部署');
-    api.workflows = [
-      {
-        id: 1,
-        run_attempt: 1,
-        head_sha: 'merge123',
-        head_branch: 'main',
-        event: 'push',
-        status: 'completed',
-        conclusion: 'failure',
-      },
-    ];
-    await command(gh, api, 5, '/release status');
-    expect(api.comments.at(-1).body).toContain('修复并重跑工作流');
-    expect(api.comments.at(-1).body).toContain('/actions/workflows/ci.yml');
-    api.workflows[0].conclusion = 'success';
-    await syncRelease(cold(gh, api), row);
-    expect((await releaseFor(cold(gh, api), api.pr))?.state).toBe('published');
-    await command(gh, api, 6, '/release status');
-    expect(api.comments.at(-1).body).toContain('/releases/tag/v0.1.0');
-    expect(api.comments.at(-1).body).toContain('无需继续操作');
   });
 });

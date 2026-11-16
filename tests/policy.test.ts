@@ -3,7 +3,7 @@ import { allowed, matches, parseConfig } from '../src/config';
 import { parseCommand, executeCommand } from '../src/commands';
 import { applyBackport } from '../src/backport';
 import { checks, commitMessage, gate, integrate, reconcilePR, tagPR } from '../src/pulls';
-import { localTime, nextVersion } from '../src/releases';
+import { localTime, releaseTitle } from '../src/releases';
 import { fixture, pull, repo, testEnv } from './fixtures';
 import { prState } from '../src/records';
 import { Denied } from '../src/types';
@@ -171,8 +171,7 @@ describe('release and patch primitives', () => {
       hour: 18,
       weekday: 4,
     });
-    expect(nextVersion(['v1.9.9', 'v1.10.0', 'junk'], 'patch', 'v0.1.0', '2026-10-15')).toBe('v1.10.1');
-    expect(nextVersion([], 'date', 'v0.1.0', '2026-10-15')).toBe('v2026.10.15');
+    expect(releaseTitle(new Date('2026-11-15T16:00:00Z'))).toBe('[release] 2026年11月16日版本发布');
   });
   it('applies only the selected diff and refuses conflicting target content', () => {
     expect(applyBackport('a\nb\nc\n', 'a\nfixed\nc\n', 'a\nb\nc\n')).toBe('a\nfixed\nc\n');

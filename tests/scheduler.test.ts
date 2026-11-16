@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { JobScheduler } from '../src/scheduler';
-import { consume, coordinate, coordinatorKey } from '../src/coordinator';
+import { consume, coordinate, coordinatorKey, deduplicateReleaseRequest } from '../src/coordinator';
 import { app } from '../src/index';
 import type { Env, Job } from '../src/types';
 import { repo, testEnv } from './fixtures';
@@ -227,5 +227,23 @@ describe('resource task coordination', () => {
         { id: 'metadata', repositoryOnly: true },
       ]),
     );
+  });
+});
+
+it('persists completed empty release requests and retries unfinished requests', async () => {
+  const namespace = (env as unknown as Env).COORDINATORS!;
+  const stub = namespace.get(namespace.idFromName('release-request-dedupe-test'));
+  await runInDurableObject(stub, async (_instance, state) => {
+    const task = job('dispatch', 'release', { releaseRunId: 123 });
+    const run = vi.fn(async () => 'ack' as const);
+    expect(await deduplicateReleaseRequest(state.storage, task, run)).toBe('ack');
+    expect(await state.storage.get('release-request:' + repo.toLowerCase() + ':123')).toBeDefined();
+    expect(await deduplicateReleaseRequest(state.storage, task, run)).toBe('ack');
+    expect(run).toHaveBeenCalledTimes(1);
+    const retry = vi.fn(async () => 'retry' as const),
+      pending = { ...task, releaseRunId: 124 };
+    expect(await deduplicateReleaseRequest(state.storage, pending, retry)).toBe('retry');
+    expect(await state.storage.get('release-request:' + repo.toLowerCase() + ':124')).toBeUndefined();
+    expect(await deduplicateReleaseRequest(state.storage, pending, run)).toBe('ack');
   });
 });

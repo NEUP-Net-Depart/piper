@@ -1,3 +1,4 @@
+import { releasePlan } from './release-policy';
 import type { GitHub } from './github';
 import { commitMessage, integratedMessage } from './commits';
 import { STATUS_MARKER } from './records';
@@ -54,7 +55,7 @@ function fenced(value: string) {
   return `${fence}\n${value}\n${fence}`;
 }
 
-function integrationSteps(
+async function integrationSteps(
   gh: GitHub,
   pr: PR,
   state: PRState,
@@ -63,19 +64,10 @@ function integrationSteps(
   autoRequestValid = true,
 ) {
   const cfg = gh.config!,
-    release = cfg.release.enabled && pr.base.ref === cfg.release.target;
+    release = cfg.release.enabled && !!(await releasePlan(gh, pr));
   if (!release && state.merge && (!state.merge.result || state.merge.result.status !== 'merged'))
     return [mergeFeedback(state.merge)];
-  if (release)
-    return ready
-      ? [
-          '**维护者**：确认上方提交信息后，在新评论中发送：',
-          '',
-          fenced('/release publish'),
-          '',
-          '使用 Merge Commit 保留提交历史。部署成功后创建版本 Tag 和 Release。',
-        ]
-      : [];
+  if (release) return [];
   if (!autoRequestValid && !policyAuto)
     return [
       '**自动集成请求无法继续**：请求人已无仓库写权限。请维护者重新发送 `/integrate auto`，或由作者、维护者使用 `/integrate` 手动合并。',
@@ -120,23 +112,31 @@ function integrationSteps(
 
 async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
   const cfg = gh.config!,
-    release = cfg.release.enabled && pr.base.ref === cfg.release.target;
+    release = cfg.release.enabled && !!(await releasePlan(gh, pr));
   const url = `https://github.com/${gh.repo}/pull/${pr.number}`;
   const lines = ['### Piper Progress', ''];
   lines.push(
     `分支：${plain(pr.head.ref)} → ${plain(pr.base.ref)} · 当前提交：[${pr.head.sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${pr.head.sha})`,
     '',
   );
+  if (release) {
+    if (pr.merged) lines.push('已合并。');
+    else if (pr.state !== 'open') lines.push('已关闭。');
+    else if (result) {
+      lines.push(...(result.ready ? ['等待合并。'] : result.reasons.map((reason) => `- ${plain(reason)}`)));
+      lines.push('', `[检查详情](${url}/checks)`);
+    }
+    return lines.join('\n');
+  }
   if (result?.stack?.detail) lines.push(plain(result.stack.detail), '');
   if (pr.merged) {
     lines.push('**已合并**', '');
     const sha = state.merge?.result?.status === 'merged' ? state.merge.result.sha : pr.merge_commit_sha;
     if (sha) lines.push(`合并提交：[${sha.slice(0, 7)}](https://github.com/${gh.repo}/commit/${sha})`, '');
-    if (release) lines.push('部署与版本发布状态请在新评论中发送 `/release status` 查询。');
   } else if (pr.state !== 'open') {
     lines.push('**已关闭，未合并**', '', '重新打开 PR 后会检查最新提交的 CI 和审查结果。');
   } else if (result) {
-    const policyAuto = !release && cfg.merge.auto && !result.highRisk && (await gh.maintainer(pr.user.login));
+    const policyAuto = cfg.merge.auto && !result.highRisk && (await gh.maintainer(pr.user.login));
     const pending = result.progress.filter((p) => !p.ready);
     const actions = pending
       .filter((p) => p.action && p.owner !== '等待' && p.owner !== '审查者')
@@ -176,7 +176,6 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
     if (result.ready && !state.merge) {
       const automatic =
         result.autoRequestValid !== false &&
-        !release &&
         state.integration === 'requested' &&
         state.integrate_mode === 'auto' &&
         state.integrate_head === pr.head.sha;
@@ -185,10 +184,9 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
           ? '**仓库自动集成已启用**，等待核验并合并，无需发送命令。'
           : automatic
             ? '**已开启自动集成**，等待核验并合并。取消：`/integrate cancel`。'
-            : `**${release ? '维护者' : '作者或维护者'}**：核对就绪通知中的最终提交信息，在新评论中发送 \`${release ? '/release publish' : '/integrate'}\`。`,
+            : '**作者或维护者**：核对就绪通知中的最终提交信息，在新评论中发送 `/integrate`。',
         '',
       );
-      if (release) lines.push('使用 Merge Commit；部署成功后创建版本 Tag 和 Release。', '');
     }
     // Request lifecycle belongs in the status; the ready notice carries the preview.
     if (
@@ -199,12 +197,8 @@ async function statusBody(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
         state.integration !== 'requested' ||
         state.integrate_mode !== 'auto')
     )
-      lines.push(...integrationSteps(gh, pr, state, false, policyAuto, result.autoRequestValid));
-    if (result.highRisk)
-      lines.push(
-        '',
-        release ? '发布需要当前提交的人工批准和维护者确认。' : '高风险变更：需要当前提交的人工批准和显式集成请求。',
-      );
+      lines.push(...(await integrationSteps(gh, pr, state, false, policyAuto, result.autoRequestValid)));
+    if (result.highRisk) lines.push('', '高风险变更：需要当前提交的人工批准和显式集成请求。');
     lines.push(
       '',
       `[检查详情（CI）](${url}/checks) · [审查意见](${url}/files) · 帮助：\`/help\``,
@@ -334,6 +328,8 @@ export async function summarize(gh: GitHub, pr: PR, state: PRState, result?: Gat
 }
 
 export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, result?: Gate) {
+  const cfg = gh.config!;
+  const plan = cfg.release.enabled ? await releasePlan(gh, pr) : undefined;
   const comments = await gh.list('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
     issue_number: pr.number,
   });
@@ -342,23 +338,29 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   );
   const link = progressURL(gh, pr.number);
   if (!result?.ready || pr.state !== 'open' || (state.merge && !pr.merged)) {
-    const pending = [
-      state.merge ? mergeFeedback(state.merge) : '当前尚未满足合并条件，请查看协作进度。',
-      '',
-      `[查看待处理事项与检查进度](${link})。`,
-      '',
-      ...(state.merge ? [] : integrationSteps(gh, pr, state, false, false, result?.autoRequestValid)),
-    ]
-      .join('\n')
-      .trimEnd();
+    const pending = plan
+      ? `[查看发布进度](${link})。`
+      : [
+          state.merge ? mergeFeedback(state.merge) : '当前尚未满足合并条件，请查看协作进度。',
+          '',
+          `[查看待处理事项与检查进度](${link})。`,
+          '',
+          ...(state.merge ? [] : await integrationSteps(gh, pr, state, false, false, result?.autoRequestValid)),
+        ]
+          .join('\n')
+          .trimEnd();
     if (existing && !(pr.merged && state.merge && !state.merge.intent.replyJob))
       await gh.managedComment(
         pr.number,
         READY_MARKER,
         pr.merged
-          ? `此 PR 已合并。[查看结果](${link})。`
+          ? plan
+            ? '已合并。'
+            : `此 PR 已合并。[查看结果](${link})。`
           : pr.state !== 'open'
-            ? `此 PR 已关闭，未合并。[查看状态](${link})。`
+            ? plan
+              ? '已关闭。'
+              : `此 PR 已关闭，未合并。[查看状态](${link})。`
             : pending,
       );
     const sha =
@@ -377,21 +379,12 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
     }
     return;
   }
-  const cfg = gh.config!,
-    release = cfg.release.enabled && pr.base.ref === cfg.release.target;
+  if (plan) {
+    await gh.managedComment(pr.number, READY_MARKER, `等待合并。\n\n${fenced(plan.title)}`);
+    return;
+  }
   let preview: string;
-  if (release) {
-    const version = /^<!-- piper-release:v1:\d{4}-\d{2}-\d{2}:(v\d+\.\d+\.\d+):/.exec(pr.body ?? '')?.[1];
-    if (
-      !version ||
-      pr.user.login !== gh.env.BOT_LOGIN ||
-      pr.user.type !== 'Bot' ||
-      pr.head.ref !== cfg.release.source ||
-      pr.head.repo?.full_name.toLowerCase() !== gh.repo.toLowerCase()
-    )
-      return;
-    preview = `Release ${version} (#${pr.number})\n\nReviewed-by: ${result.reviewers.join(', ')}`;
-  } else {
+  {
     const commits = await gh.list('GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', { pull_number: pr.number });
     if (commits.length >= 250) {
       await gh.managedComment(
@@ -411,7 +404,6 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   }
   const author = userReference(pr.user, true);
   const command = (name: string) => `\`${name}\``;
-  const method = release ? 'Merge Commit' : 'Squash';
   const lines = [
     `${author} 当前提交 \`${pr.head.sha.slice(0, 7)}\` 已满足 CI 和审查要求。`,
     '',
@@ -419,14 +411,14 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
     '',
     fenced(preview),
     '',
-    ...integrationSteps(
+    ...(await integrationSteps(
       gh,
       pr,
       state,
       true,
-      !release && cfg.merge.auto && !result.highRisk && (await gh.maintainer(pr.user.login)),
+      cfg.merge.auto && !result.highRisk && (await gh.maintainer(pr.user.login)),
       result.autoRequestValid,
-    ),
+    )),
     '',
     `合并前请确认项目要求的其他人工检查已完成，详见[参与指南](${cfg.welcome.guide})。`,
     '',
@@ -434,11 +426,10 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
     '<summary>提交说明与目标分支变化</summary>',
     '',
   ];
-  if (!release)
-    lines.push(
-      `可以使用 ${command('/summary')} 调整提交摘要，由维护者使用 ${command('/contributor')} 和 ${command('/author')} 调整署名。`,
-      '',
-    );
+  lines.push(
+    `可以使用 ${command('/summary')} 调整提交摘要，由维护者使用 ${command('/contributor')} 和 ${command('/author')} 调整署名。`,
+    '',
+  );
   const comparison = await gh.read('GET /repos/{owner}/{repo}/compare/{basehead}', {
     basehead: `${pr.head.sha}...${pr.base.sha}`,
   });
@@ -454,13 +445,13 @@ export async function integrationNotice(gh: GitHub, pr: PR, state: PRState, resu
   else lines.push(`[查看完整比较](${compare})。`);
   lines.push(
     '',
-    `当前没有合并冲突。Piper 将通过 ${method} 集成上述修改，执行前会再次核验当前提交、CI、人工批准和分支规则。`,
+    '当前没有合并冲突。Piper 将通过 Squash 集成上述修改，执行前会再次核验当前提交、CI、人工批准和分支规则。',
     '',
     `当前提交：\`${pr.head.sha}\`。`,
     '',
     '</details>',
     '',
-    `[查看协作进度](${link}) · 在新评论中发送 ${command(release ? '/help release' : '/help integrate')} 查看命令用法。`,
+    `[查看协作进度](${link}) · 在新评论中发送 ${command('/help integrate')} 查看命令用法。`,
   );
   await gh.managedComment(pr.number, READY_MARKER, lines.join('\n'));
 }
